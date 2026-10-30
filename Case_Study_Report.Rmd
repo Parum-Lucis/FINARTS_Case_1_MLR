@@ -1,0 +1,145 @@
+---
+title: "FINARTS_CO2_G6_Case_1"
+author: "Adrian Denzel Macayan"
+date: "2026-10-30"
+output: pdf_document
+---
+
+```{r setup, echo=FALSE}
+if (!requireNamespace("pacman", quietly = TRUE)) {
+  install.packages("pacman")
+}
+
+pacman::p_load(
+  tidyverse,      
+  skimr,          
+  corrplot,      
+  lubridate,
+  quantmod,
+  zoo,
+  readxl,
+  
+  # modeling and summary formatting
+  broom,         
+  modelsummary,   
+  
+  # diagnostic testing & inference
+  car,            
+  lmtest,         
+  sandwich,      
+  olsrr
+)
+
+# knitr setup
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 12,
+  fig.height = 4.5
+)
+```
+
+```{r date_setup}
+start_date <- ymd("2017-12-01")
+end_date   <- ymd("2025-12-31")
+```
+
+```{r load fred}
+getSymbols(c("DCOILWTICO", "SP500"), src = "FRED", auto.assign = TRUE)
+
+us_daily <- merge(DCOILWTICO, SP500)
+us_daily <- us_daily[paste0(start_date, "/", end_date)]
+
+df_us_daily <- tibble(
+  date     = as.Date(index(us_daily)),
+  wti_oil  = as.numeric(us_daily$DCOILWTICO),
+  sp500    = as.numeric(us_daily$SP500)
+)
+```
+```{r load lseg-ph-finmkt}
+ph_10y_raw <- read_excel("PH_10Y_GS_YIELD_1825.xlsx", skip = 18)
+ph_10y_daily <- ph_10y_raw %>%
+  select(date = Date, ph_10y_yield = `Yield to Maturity`) %>%
+  mutate(
+    date = as.Date(date),
+    ph_10y_yield = as.numeric(ph_10y_yield)
+  ) %>%
+  filter(!is.na(date) & between(date, start_date, end_date))
+
+psei_raw <- read_excel("PSEI_1825.xlsx", skip = 32)
+psei_daily <- psei_raw %>%
+  select(date = `Exchange Date`, psei_close = Close) %>%
+  mutate(
+    date = as.Date(date),
+    psei_close = as.numeric(psei_close)
+  ) %>%
+  filter(!is.na(date) & between(date, start_date, end_date))
+
+usdphp_raw <- read_excel("USDPHP_1825.xlsx", skip = 28)
+usdphp_daily <- usdphp_raw %>%
+  select(date = `Exchange Date`, usdphp_mid = `Mid Price`) %>%
+  mutate(
+    date = as.Date(date),
+    usdphp_mid = as.numeric(usdphp_mid)
+  ) %>%
+  filter(!is.na(date) & between(date, start_date, end_date))
+```
+
+```{r load lseg-ph-macroecon}
+read_ph_macro <- function(filepath, var_name) {
+  read_excel(filepath, skip = 1) %>%
+    set_names(c("date", var_name)) %>%
+    filter(!is.na(date) & !is.na(.data[[var_name]])) %>%
+    mutate(
+      date = as.Date(date),
+      # Truncate to first of the month for clean relational joins
+      year_month = floor_date(date, unit = "month"),
+      !!var_name := as.numeric(.data[[var_name]])
+    ) %>%
+    select(year_month, all_of(var_name))
+}
+
+cpi_monthly  <- read_ph_macro("PH_CPI_YY_1626.xlsx", "ph_cpi_yy")
+m3_monthly   <- read_ph_macro("PH_M3_YY_1626.xlsx", "ph_m3_yy")
+mfg_monthly  <- read_ph_macro("PH_Manufacturing_Production_YY_1626.xlsx", "ph_mfg_prod_yy")
+```
+
+```{r consolidate main-dataframe}
+daily_financials <- psei_daily %>%
+  full_join(usdphp_daily, by = "date") %>%
+  full_join(ph_10y_daily, by = "date") %>%
+  full_join(df_us_daily, by = "date") %>%
+  arrange(date) %>%
+  # forward fill missing based on last previous day
+  tidyr::fill(psei_close, usdphp_mid, ph_10y_yield, wti_oil, sp500, .direction = "down")
+
+financial_monthly <- daily_financials %>%
+  mutate(year_month = floor_date(date, unit = "month")) %>%
+  group_by(year_month) %>%
+```
+
+
+```{r consolidate main-dataframe}
+summarise(
+    psei_close   = last(na.omit(psei_close)),
+    usdphp_mid   = last(na.omit(usdphp_mid)),
+    ph_10y_yield = last(na.omit(ph_10y_yield)),
+    wti_oil      = last(na.omit(wti_oil)),
+    sp500        = last(na.omit(sp500)),
+    .groups      = "drop"
+  )
+
+df_econometrics <- financial_monthly %>%
+  left_join(cpi_monthly, by = "year_month") %>%
+  left_join(m3_monthly,  by = "year_month") %>%
+  left_join(mfg_monthly, by = "year_month") %>%
+  filter(
+    year_month >= floor_date(start_date, "month") &
+    year_month <= floor_date(end_date, "month")
+  ) %>%
+  arrange(year_month)
+
+glimpse(df_econometrics)
+head(df_econometrics)
+```
