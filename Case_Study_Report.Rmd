@@ -46,44 +46,58 @@ end_date   <- ymd("2025-12-31")
 ```
 
 ```{r load fred}
-getSymbols(c("DCOILWTICO", "SP500"), src = "FRED", auto.assign = TRUE)
+getSymbols(c("DCOILWTICO", "SP500", "VIXCLS"), src = "FRED", auto.assign = TRUE)
 
-us_daily <- merge(DCOILWTICO, SP500)
+us_daily <- merge(DCOILWTICO, SP500, VIXCLS)
 us_daily <- us_daily[paste0(start_date, "/", end_date)]
 
 df_us_daily <- tibble(
-  date     = as.Date(index(us_daily)),
-  wti_oil  = as.numeric(us_daily$DCOILWTICO),
-  sp500    = as.numeric(us_daily$SP500)
+  date  = as.Date(index(us_daily)),
+  WTI   = as.numeric(us_daily$DCOILWTICO),
+  SP500 = as.numeric(us_daily$SP500),
+  VIX   = as.numeric(us_daily$VIXCLS)
 )
 ```
 ```{r load lseg-ph-finmkt}
+# LSEG price-history exports store dates as Excel serial numbers
+excel_date <- function(x) as.Date(as.numeric(x), origin = "1899-12-30")
+
 ph_10y_raw <- read_excel("PH_10Y_GS_YIELD_1825.xlsx", skip = 18)
 ph_10y_daily <- ph_10y_raw %>%
-  select(date = Date, ph_10y_yield = `Yield to Maturity`) %>%
+  select(date = Date, PH_10Y_GS_Yield = `Yield to Maturity`) %>%
   mutate(
-    date = as.Date(date),
-    ph_10y_yield = as.numeric(ph_10y_yield)
+    date = excel_date(date),
+    PH_10Y_GS_Yield = as.numeric(PH_10Y_GS_Yield)
   ) %>%
   filter(!is.na(date) & between(date, start_date, end_date))
 
 psei_raw <- read_excel("PSEI_1825.xlsx", skip = 32)
 psei_daily <- psei_raw %>%
-  select(date = `Exchange Date`, psei_close = Close) %>%
+  select(date = `Exchange Date`, PSEI = Close) %>%
   mutate(
-    date = as.Date(date),
-    psei_close = as.numeric(psei_close)
+    date = excel_date(date),
+    PSEI =as.numeric(PSEI)
   ) %>%
   filter(!is.na(date) & between(date, start_date, end_date))
 
 usdphp_raw <- read_excel("USDPHP_1825.xlsx", skip = 28)
 usdphp_daily <- usdphp_raw %>%
-  select(date = `Exchange Date`, usdphp_mid = `Mid Price`) %>%
+  select(date = `Exchange Date`, USD_PHP = `Mid Price`) %>%
   mutate(
-    date = as.Date(date),
-    usdphp_mid = as.numeric(usdphp_mid)
+    date = excel_date(date),
+    USD_PHP =as.numeric(USD_PHP)
   ) %>%
   filter(!is.na(date) & between(date, start_date, end_date))
+
+rrp_raw <- read_excel("PH_RRP_1725.xlsx", skip = 2,
+                      col_names = c("date", "BSP_RRP_Rate"))
+rrp_1725 <- rrp_raw %>%
+  mutate(
+    date = as.Date(date),
+    BSP_RRP_Rate = as.numeric(BSP_RRP_Rate)
+  ) %>%
+  filter(!is.na(date) & date <= end_date) %>%
+  arrange(date)
 ```
 
 ```{r load lseg-ph-macroecon}
@@ -100,9 +114,9 @@ read_ph_macro <- function(filepath, var_name) {
     select(year_month, all_of(var_name))
 }
 
-cpi_monthly  <- read_ph_macro("PH_CPI_YY_1626.xlsx", "ph_cpi_yy")
-m3_monthly   <- read_ph_macro("PH_M3_YY_1626.xlsx", "ph_m3_yy")
-mfg_monthly  <- read_ph_macro("PH_Manufacturing_Production_YY_1626.xlsx", "ph_mfg_prod_yy")
+cpi_monthly  <- read_ph_macro("PH_CPI_YY_1626.xlsx", "PH_CPI")
+m3_monthly   <- read_ph_macro("PH_M3_YY_1626.xlsx", "PH_M3")
+mfg_monthly  <- read_ph_macro("PH_Manufacturing_Production_YY_1626.xlsx", "PH_Manufacturing_Production")
 ```
 
 ```{r consolidate main-dataframe}
@@ -111,35 +125,275 @@ daily_financials <- psei_daily %>%
   full_join(ph_10y_daily, by = "date") %>%
   full_join(df_us_daily, by = "date") %>%
   arrange(date) %>%
-  # forward fill missing based on last previous day
-  tidyr::fill(psei_close, usdphp_mid, ph_10y_yield, wti_oil, sp500, .direction = "down")
+  # forward fill missing based on last previous day (VIX is averaged, so not filled)
+  tidyr::fill(PSEI, USD_PHP, PH_10Y_GS_Yield, WTI, SP500, .direction = "down")
+
+# month-end value; NA (not size 0) when a month has no observations yet
+last_valid <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) NA_real_ else x[length(x)]
+}
 
 financial_monthly <- daily_financials %>%
   mutate(year_month = floor_date(date, unit = "month")) %>%
   group_by(year_month) %>%
-```
-
-
-```{r consolidate main-dataframe}
-summarise(
-    psei_close   = last(na.omit(psei_close)),
-    usdphp_mid   = last(na.omit(usdphp_mid)),
-    ph_10y_yield = last(na.omit(ph_10y_yield)),
-    wti_oil      = last(na.omit(wti_oil)),
-    sp500        = last(na.omit(sp500)),
-    .groups      = "drop"
+  summarise(
+    PSEI            = last_valid(PSEI),
+    USD_PHP         = last_valid(USD_PHP),
+    PH_10Y_GS_Yield = last_valid(PH_10Y_GS_Yield),
+    WTI             = last_valid(WTI),
+    SP500           = last_valid(SP500),
+    VIX             = if (all(is.na(VIX))) NA_real_ else mean(VIX, na.rm = TRUE),
+    .groups         = "drop"
   )
 
-df_econometrics <- financial_monthly %>%
-  left_join(cpi_monthly, by = "year_month") %>%
-  left_join(m3_monthly,  by = "year_month") %>%
-  left_join(mfg_monthly, by = "year_month") %>%
-  filter(
-    year_month >= floor_date(start_date, "month") &
-    year_month <= floor_date(end_date, "month")
+# one row per month, Dec 2017 - Dec 2025 (Dec 2017 is only the base month for
+# the returns / first differences and is dropped below)
+month_spine <- tibble(
+  year_month = seq(floor_date(start_date, "month"),
+                   floor_date(end_date, "month"), by = "month")
+)
+
+# BSP RRP rate in force at each month-end (rate changes on meeting dates)
+rrp_monthly <- month_spine %>%
+  mutate(
+    month_end    = ceiling_date(year_month, "month") - days(1),
+    rrp_idx      = findInterval(as.numeric(month_end), as.numeric(rrp_1725$date)),
+    BSP_RRP_Rate = if_else(rrp_idx == 0, NA_real_,
+                           rrp_1725$BSP_RRP_Rate[pmax(rrp_idx, 1)])
   ) %>%
-  arrange(year_month)
+  select(year_month, BSP_RRP_Rate)
+
+df_econometrics <- month_spine %>%
+  left_join(financial_monthly, by = "year_month") %>%
+  left_join(rrp_monthly,       by = "year_month") %>%
+  left_join(cpi_monthly,       by = "year_month") %>%
+  left_join(m3_monthly,        by = "year_month") %>%
+  left_join(mfg_monthly,       by = "year_month") %>%
+  arrange(year_month) %>%
+  mutate(
+    # monthly log returns / log changes (month-end levels)
+    PSEI    = log(PSEI)    - log(lag(PSEI)),
+    SP500   = log(SP500)   - log(lag(SP500)),
+    USD_PHP = log(USD_PHP) - log(lag(USD_PHP)),
+    WTI     = log(WTI)     - log(lag(WTI)),
+    # month-end first differences
+    BSP_RRP_Rate    = BSP_RRP_Rate    - lag(BSP_RRP_Rate),
+    PH_10Y_GS_Yield = PH_10Y_GS_Yield - lag(PH_10Y_GS_Yield)
+    # PH_CPI, PH_M3, PH_Manufacturing_Production are already YoY % in the LSEG
+    # files; VIX is already the monthly average
+  ) %>%
+  # drop 2017
+  filter(year(year_month) >= 2018)
 
 glimpse(df_econometrics)
 head(df_econometrics)
+```
+```{r data-quality-checks}
+# 1. structure: row count, month coverage, duplicates, gaps
+expected_months <- seq(ymd("2018-01-01"), ymd("2025-12-01"), by = "month")
+tibble(
+  rows               = nrow(df_econometrics),
+  expected_rows      = length(expected_months),
+  first_month        = min(df_econometrics$year_month),
+  last_month         = max(df_econometrics$year_month),
+  duplicate_months   = sum(duplicated(df_econometrics$year_month)),
+  missing_months     = sum(!expected_months %in% df_econometrics$year_month),
+  is_sorted          = !is.unsorted(df_econometrics$year_month)
+) %>%
+  pivot_longer(everything(), names_to = "check", values_to = "value",
+               values_transform = as.character) %>%
+  knitr::kable(caption = "Structure and month coverage")
+
+# 2. data types, missing, non-finite, constant columns
+df_econometrics %>%
+  summarise(across(everything(), list(
+    type     = ~ class(.x)[1],
+    n_na     = ~ sum(is.na(.x)),
+    pct_na   = ~ round(100 * mean(is.na(.x)), 1),
+    n_inf    = ~ if (is.numeric(.x)) sum(is.infinite(.x)) else 0L,
+    n_unique = ~ n_distinct(.x)
+  ), .names = "{.col}__{.fn}")) %>%
+  pivot_longer(everything(), names_to = c("variable", ".value"),
+               names_sep = "__") %>%
+  knitr::kable(caption = "Data types, missing observations and non-finite values")
+
+# 3. which months have missing values
+df_econometrics %>%
+  filter(if_any(-year_month, is.na)) %>%
+  transmute(year_month,
+            missing_vars = pmap_chr(pick(-year_month),
+              function(...) paste(names(c(...))[is.na(c(...))], collapse = ", "))) %>%
+  knitr::kable(caption = "Months with missing values")
+
+# 4. distribution / outlier screen (|z| > 3)
+df_econometrics %>%
+  select(where(is.numeric)) %>%
+  pivot_longer(everything(), names_to = "variable") %>%
+  group_by(variable) %>%
+  summarise(
+    min        = min(value, na.rm = TRUE),
+    median     = median(value, na.rm = TRUE),
+    mean       = mean(value, na.rm = TRUE),
+    max        = max(value, na.rm = TRUE),
+    sd         = sd(value, na.rm = TRUE),
+    n_outliers = sum(abs(value - mean) / sd > 3, na.rm = TRUE),
+    .groups    = "drop"
+  ) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
+  knitr::kable(caption = "Ranges and outliers (|z| > 3)")
+
+# 5. plausibility rules
+tibble(
+  check = c("VIX <= 0", "PH_CPI outside [-5, 25]%", "PH_M3 outside [-20, 40]%",
+            "PH_Manufacturing_Production outside [-50, 100]%",
+            "|monthly log return| > 0.25 (PSEI, SP500, USD_PHP, WTI)"),
+  n_flagged = c(
+    sum(df_econometrics$VIX <= 0, na.rm = TRUE),
+    sum(!between(df_econometrics$PH_CPI, -5, 25), na.rm = TRUE),
+    sum(!between(df_econometrics$PH_M3, -20, 40), na.rm = TRUE),
+    sum(!between(df_econometrics$PH_Manufacturing_Production, -50, 100), na.rm = TRUE),
+    sum(abs(as.matrix(df_econometrics[c("PSEI", "SP500", "USD_PHP", "WTI")])) > 0.25,
+        na.rm = TRUE)
+  )
+) %>%
+  knitr::kable(caption = "Plausibility checks")
+```
+
+```{r descriptive-stats}
+skewness <- function(x) mean((x - mean(x))^3) / mean((x - mean(x))^2)^1.5
+excess_kurtosis <- function(x) mean((x - mean(x))^4) / mean((x - mean(x))^2)^2 - 3
+
+vars <- setdiff(names(df_econometrics), "year_month")
+
+num_long <- df_econometrics %>%
+  pivot_longer(all_of(vars), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  mutate(variable = factor(variable, levels = vars))
+
+desc_stats <- num_long %>%
+  group_by(variable) %>%
+  summarise(
+    n        = n(),
+    mean     = mean(value),
+    median   = median(value),
+    min      = min(value),
+    max      = max(value),
+    range    = max - min,
+    sd       = sd(value),
+    skewness = skewness(value),
+    ex_kurtosis = excess_kurtosis(value),
+    .groups  = "drop"
+  )
+
+desc_stats %>%
+  mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
+  knitr::kable(caption = "Descriptive statistics (excess kurtosis; normal = 0)")
+
+# panel labels carrying the statistics
+panel_labels <- desc_stats %>%
+  transmute(
+    variable,
+    lab_center = sprintf("%s\nmean = %.3f | median = %.3f", variable, mean, median),
+    lab_spread = sprintf("%s\nrange = %.3f | sd = %.3f", variable, range, sd),
+    lab_shape  = sprintf("%s\nskew = %.2f | ex. kurtosis = %.2f", variable, skewness, ex_kurtosis)
+  ) %>%
+  # keep facets in dataset column order rather than alphabetical
+  mutate(across(starts_with("lab_"), ~ factor(.x, levels = .x)))
+
+plot_data <- num_long %>% left_join(panel_labels, by = "variable")
+stat_lines <- desc_stats %>%
+  select(variable, mean, median) %>%
+  pivot_longer(c(mean, median), names_to = "stat", values_to = "x") %>%
+  left_join(panel_labels, by = "variable")
+```
+
+```{r descriptive-histograms, fig.height=14}
+# histogram per variable with mean and median
+ggplot(plot_data, aes(value)) +
+  geom_histogram(bins = 25, fill = "grey70", colour = "white") +
+  geom_vline(data = stat_lines, aes(xintercept = x, colour = stat, linetype = stat),
+             linewidth = 0.8) +
+  facet_wrap(~ lab_center, scales = "free", ncol = 2) +
+  scale_colour_manual(values = c(mean = "firebrick", median = "steelblue"), name = NULL) +
+  scale_linetype_manual(values = c(mean = "solid", median = "dashed"), name = NULL) +
+  labs(title = "Histograms with mean and median", x = NULL, y = "Count") +
+  theme_minimal() +
+  theme(legend.position = "bottom", strip.text = element_text(face = "bold"))
+```
+
+```{r descriptive-distributions, fig.height=14}
+# density per variable vs a normal curve with the same mean / sd (skewness, kurtosis)
+normal_curves <- desc_stats %>%
+  select(variable, mean, sd) %>%
+  mutate(x = map2(mean, sd, ~ seq(.x - 4 * .y, .x + 4 * .y, length.out = 200))) %>%
+  unnest(x) %>%
+  mutate(density = dnorm(x, mean, sd)) %>%
+  left_join(panel_labels, by = "variable")
+
+ggplot(plot_data, aes(value)) +
+  geom_density(aes(colour = "Observed"), fill = "steelblue", alpha = 0.3, linewidth = 0.8) +
+  geom_line(data = normal_curves, aes(x, density, colour = "Normal"),
+            linetype = "dashed", linewidth = 0.7) +
+  facet_wrap(~ lab_shape, scales = "free", ncol = 2) +
+  scale_colour_manual(values = c(Observed = "steelblue", Normal = "firebrick"), name = NULL) +
+  labs(title = "Distributions vs normal (skewness and excess kurtosis)", x = NULL, y = "Density") +
+  theme_minimal() +
+  theme(legend.position = "bottom", strip.text = element_text(face = "bold"))
+```
+
+```{r descriptive-boxplots, fig.height=14}
+ggplot(plot_data, aes(x = "", y = value)) +
+  geom_boxplot(fill = "grey85", outlier.colour = "firebrick", outlier.size = 1.8) +
+  stat_summary(fun = mean, geom = "point", shape = 23, fill = "white", size = 2) +
+  coord_flip() +
+  facet_wrap(~ lab_spread, scales = "free", ncol = 2) +
+  labs(title = "Boxplots (diamond = mean, red = outliers)", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"), axis.text.y = element_blank())
+```
+
+```{r correlation-matrix, fig.height=8}
+# pairwise-complete Pearson correlations (January 2018 is NA for 3 variables)
+cor_matrix <- df_econometrics %>%
+  select(all_of(vars)) %>%
+  cor(use = "pairwise.complete.obs")
+
+round(cor_matrix, 3) %>%
+  knitr::kable(caption = "Pearson correlation matrix")
+
+# correlation heatmap; blank cells are not significant at the 5% level
+cor_pvalues <- outer(vars, vars, Vectorize(function(a, b) {
+  if (a == b) return(0)
+  cor.test(df_econometrics[[a]], df_econometrics[[b]])$p.value
+}))
+dimnames(cor_pvalues) <- dimnames(cor_matrix)
+
+corrplot(cor_matrix, method = "color", type = "upper", order = "original",
+         addCoef.col = "black", number.cex = 0.7, tl.col = "black", tl.srt = 45,
+         p.mat = cor_pvalues, sig.level = 0.05, insig = "blank",
+         diag = FALSE, mar = c(0, 0, 2, 0),
+         title = "Correlation matrix (blank = not significant at 5%)")
+
+# strongest pairs, and PSEI against each candidate regressor
+cor_pairs <- as_tibble(cor_matrix, rownames = "var1") %>%
+  pivot_longer(-var1, names_to = "var2", values_to = "r") %>%
+  filter(match(var1, vars) < match(var2, vars)) %>%
+  arrange(desc(abs(r)))
+
+cor_pairs %>%
+  slice_head(n = 10) %>%
+  mutate(r = round(r, 3)) %>%
+  knitr::kable(caption = "Ten strongest pairwise correlations")
+
+cor_pairs %>%
+  filter(var1 == "PSEI") %>%
+  mutate(r = round(r, 3)) %>%
+  knitr::kable(caption = "Correlation of PSEI with each candidate regressor")
+
+# multicollinearity screen among regressors
+cor_pairs %>%
+  filter(var1 != "PSEI", abs(r) > 0.7) %>%
+  mutate(r = round(r, 3)) %>%
+  knitr::kable(caption = "Regressor pairs with |r| > 0.7 (multicollinearity flag)")
 ```
