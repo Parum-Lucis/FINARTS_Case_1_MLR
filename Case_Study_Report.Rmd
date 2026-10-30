@@ -63,54 +63,54 @@ df_us_daily <- tibble(
 excel_date <- function(x) as.Date(as.numeric(x), origin = "1899-12-30")
 
 ph_10y_raw <- read_excel("PH_10Y_GS_YIELD_1825.xlsx", skip = 18)
-ph_10y_daily <- ph_10y_raw %>%
-  select(date = Date, PH_10Y_GS_Yield = `Yield to Maturity`) %>%
+ph_10y_daily <- ph_10y_raw |>
+  select(date = Date, PH_10Y_GS_Yield = `Yield to Maturity`) |>
   mutate(
     date = excel_date(date),
     PH_10Y_GS_Yield = as.numeric(PH_10Y_GS_Yield)
-  ) %>%
+  ) |>
   filter(!is.na(date) & between(date, start_date, end_date))
 
 psei_raw <- read_excel("PSEI_1825.xlsx", skip = 32)
-psei_daily <- psei_raw %>%
-  select(date = `Exchange Date`, PSEI = Close) %>%
+psei_daily <- psei_raw |>
+  select(date = `Exchange Date`, PSEI = Close) |>
   mutate(
     date = excel_date(date),
     PSEI =as.numeric(PSEI)
-  ) %>%
+  ) |>
   filter(!is.na(date) & between(date, start_date, end_date))
 
 usdphp_raw <- read_excel("USDPHP_1825.xlsx", skip = 28)
-usdphp_daily <- usdphp_raw %>%
-  select(date = `Exchange Date`, USD_PHP = `Mid Price`) %>%
+usdphp_daily <- usdphp_raw |>
+  select(date = `Exchange Date`, USD_PHP = `Mid Price`) |>
   mutate(
     date = excel_date(date),
     USD_PHP =as.numeric(USD_PHP)
-  ) %>%
+  ) |>
   filter(!is.na(date) & between(date, start_date, end_date))
 
 rrp_raw <- read_excel("PH_RRP_1725.xlsx", skip = 2,
                       col_names = c("date", "BSP_RRP_Rate"))
-rrp_1725 <- rrp_raw %>%
+rrp_1725 <- rrp_raw |>
   mutate(
     date = as.Date(date),
     BSP_RRP_Rate = as.numeric(BSP_RRP_Rate)
-  ) %>%
-  filter(!is.na(date) & date <= end_date) %>%
+  ) |>
+  filter(!is.na(date) & date <= end_date) |>
   arrange(date)
 ```
 
 ```{r load lseg-ph-macroecon}
 read_ph_macro <- function(filepath, var_name) {
-  read_excel(filepath, skip = 1) %>%
-    set_names(c("date", var_name)) %>%
-    filter(!is.na(date) & !is.na(.data[[var_name]])) %>%
+  read_excel(filepath, skip = 1) |>
+    set_names(c("date", var_name)) |>
+    filter(!is.na(date) & !is.na(.data[[var_name]])) |>
     mutate(
       date = as.Date(date),
       # Truncate to first of the month for clean relational joins
       year_month = floor_date(date, unit = "month"),
       !!var_name := as.numeric(.data[[var_name]])
-    ) %>%
+    ) |>
     select(year_month, all_of(var_name))
 }
 
@@ -120,11 +120,11 @@ mfg_monthly  <- read_ph_macro("PH_Manufacturing_Production_YY_1626.xlsx", "PH_Ma
 ```
 
 ```{r consolidate main-dataframe}
-daily_financials <- psei_daily %>%
-  full_join(usdphp_daily, by = "date") %>%
-  full_join(ph_10y_daily, by = "date") %>%
-  full_join(df_us_daily, by = "date") %>%
-  arrange(date) %>%
+daily_financials <- psei_daily |>
+  full_join(usdphp_daily, by = "date") |>
+  full_join(ph_10y_daily, by = "date") |>
+  full_join(df_us_daily, by = "date") |>
+  arrange(date) |>
   # forward fill missing based on last previous day (VIX is averaged, so not filled)
   tidyr::fill(PSEI, USD_PHP, PH_10Y_GS_Yield, WTI, SP500, .direction = "down")
 
@@ -134,9 +134,9 @@ last_valid <- function(x) {
   if (length(x) == 0) NA_real_ else x[length(x)]
 }
 
-financial_monthly <- daily_financials %>%
-  mutate(year_month = floor_date(date, unit = "month")) %>%
-  group_by(year_month) %>%
+financial_monthly <- daily_financials |>
+  mutate(year_month = floor_date(date, unit = "month")) |>
+  group_by(year_month) |>
   summarise(
     PSEI            = last_valid(PSEI),
     USD_PHP         = last_valid(USD_PHP),
@@ -155,22 +155,22 @@ month_spine <- tibble(
 )
 
 # BSP RRP rate in force at each month-end (rate changes on meeting dates)
-rrp_monthly <- month_spine %>%
+rrp_monthly <- month_spine |>
   mutate(
     month_end    = ceiling_date(year_month, "month") - days(1),
     rrp_idx      = findInterval(as.numeric(month_end), as.numeric(rrp_1725$date)),
     BSP_RRP_Rate = if_else(rrp_idx == 0, NA_real_,
                            rrp_1725$BSP_RRP_Rate[pmax(rrp_idx, 1)])
-  ) %>%
+  ) |>
   select(year_month, BSP_RRP_Rate)
 
-df_econometrics <- month_spine %>%
-  left_join(financial_monthly, by = "year_month") %>%
-  left_join(rrp_monthly,       by = "year_month") %>%
-  left_join(cpi_monthly,       by = "year_month") %>%
-  left_join(m3_monthly,        by = "year_month") %>%
-  left_join(mfg_monthly,       by = "year_month") %>%
-  arrange(year_month) %>%
+df_econometrics <- month_spine |>
+  left_join(financial_monthly, by = "year_month") |>
+  left_join(rrp_monthly,       by = "year_month") |>
+  left_join(cpi_monthly,       by = "year_month") |>
+  left_join(m3_monthly,        by = "year_month") |>
+  left_join(mfg_monthly,       by = "year_month") |>
+  arrange(year_month) |>
   mutate(
     # monthly log returns / log changes (month-end levels)
     PSEI    = log(PSEI)    - log(lag(PSEI)),
@@ -182,7 +182,7 @@ df_econometrics <- month_spine %>%
     PH_10Y_GS_Yield = PH_10Y_GS_Yield - lag(PH_10Y_GS_Yield)
     # PH_CPI, PH_M3, PH_Manufacturing_Production are already YoY % in the LSEG
     # files; VIX is already the monthly average
-  ) %>%
+  ) |>
   # drop 2017
   filter(year(year_month) >= 2018)
 
@@ -200,37 +200,37 @@ tibble(
   duplicate_months   = sum(duplicated(df_econometrics$year_month)),
   missing_months     = sum(!expected_months %in% df_econometrics$year_month),
   is_sorted          = !is.unsorted(df_econometrics$year_month)
-) %>%
+) |>
   pivot_longer(everything(), names_to = "check", values_to = "value",
-               values_transform = as.character) %>%
+               values_transform = as.character) |>
   knitr::kable(caption = "Structure and month coverage")
 
 # 2. data types, missing, non-finite, constant columns
-df_econometrics %>%
+df_econometrics |>
   summarise(across(everything(), list(
     type     = ~ class(.x)[1],
     n_na     = ~ sum(is.na(.x)),
     pct_na   = ~ round(100 * mean(is.na(.x)), 1),
     n_inf    = ~ if (is.numeric(.x)) sum(is.infinite(.x)) else 0L,
     n_unique = ~ n_distinct(.x)
-  ), .names = "{.col}__{.fn}")) %>%
+  ), .names = "{.col}__{.fn}")) |>
   pivot_longer(everything(), names_to = c("variable", ".value"),
-               names_sep = "__") %>%
+               names_sep = "__") |>
   knitr::kable(caption = "Data types, missing observations and non-finite values")
 
 # 3. which months have missing values
-df_econometrics %>%
-  filter(if_any(-year_month, is.na)) %>%
+df_econometrics |>
+  filter(if_any(-year_month, is.na)) |>
   transmute(year_month,
             missing_vars = pmap_chr(pick(-year_month),
-              function(...) paste(names(c(...))[is.na(c(...))], collapse = ", "))) %>%
+              function(...) paste(names(c(...))[is.na(c(...))], collapse = ", "))) |>
   knitr::kable(caption = "Months with missing values")
 
 # 4. distribution / outlier screen (|z| > 3)
-df_econometrics %>%
-  select(where(is.numeric)) %>%
-  pivot_longer(everything(), names_to = "variable") %>%
-  group_by(variable) %>%
+df_econometrics |>
+  select(where(is.numeric)) |>
+  pivot_longer(everything(), names_to = "variable") |>
+  group_by(variable) |>
   summarise(
     min        = min(value, na.rm = TRUE),
     median     = median(value, na.rm = TRUE),
@@ -239,8 +239,8 @@ df_econometrics %>%
     sd         = sd(value, na.rm = TRUE),
     n_outliers = sum(abs(value - mean) / sd > 3, na.rm = TRUE),
     .groups    = "drop"
-  ) %>%
-  mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
+  ) |>
+  mutate(across(where(is.numeric), ~ round(.x, 4))) |>
   knitr::kable(caption = "Ranges and outliers (|z| > 3)")
 
 # 5. plausibility rules
@@ -256,7 +256,7 @@ tibble(
     sum(abs(as.matrix(df_econometrics[c("PSEI", "SP500", "USD_PHP", "WTI")])) > 0.25,
         na.rm = TRUE)
   )
-) %>%
+) |>
   knitr::kable(caption = "Plausibility checks")
 ```
 
@@ -266,13 +266,13 @@ excess_kurtosis <- function(x) mean((x - mean(x))^4) / mean((x - mean(x))^2)^2 -
 
 vars <- setdiff(names(df_econometrics), "year_month")
 
-num_long <- df_econometrics %>%
-  pivot_longer(all_of(vars), names_to = "variable", values_to = "value") %>%
-  filter(!is.na(value)) %>%
+num_long <- df_econometrics |>
+  pivot_longer(all_of(vars), names_to = "variable", values_to = "value") |>
+  filter(!is.na(value)) |>
   mutate(variable = factor(variable, levels = vars))
 
-desc_stats <- num_long %>%
-  group_by(variable) %>%
+desc_stats <- num_long |>
+  group_by(variable) |>
   summarise(
     n        = n(),
     mean     = mean(value),
@@ -286,25 +286,25 @@ desc_stats <- num_long %>%
     .groups  = "drop"
   )
 
-desc_stats %>%
-  mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
+desc_stats |>
+  mutate(across(where(is.numeric), ~ round(.x, 4))) |>
   knitr::kable(caption = "Descriptive statistics (excess kurtosis; normal = 0)")
 
 # panel labels carrying the statistics
-panel_labels <- desc_stats %>%
+panel_labels <- desc_stats |>
   transmute(
     variable,
     lab_center = sprintf("%s\nmean = %.3f | median = %.3f", variable, mean, median),
     lab_spread = sprintf("%s\nrange = %.3f | sd = %.3f", variable, range, sd),
     lab_shape  = sprintf("%s\nskew = %.2f | ex. kurtosis = %.2f", variable, skewness, ex_kurtosis)
-  ) %>%
+  ) |>
   # keep facets in dataset column order rather than alphabetical
   mutate(across(starts_with("lab_"), ~ factor(.x, levels = .x)))
 
-plot_data <- num_long %>% left_join(panel_labels, by = "variable")
-stat_lines <- desc_stats %>%
-  select(variable, mean, median) %>%
-  pivot_longer(c(mean, median), names_to = "stat", values_to = "x") %>%
+plot_data <- num_long |> left_join(panel_labels, by = "variable")
+stat_lines <- desc_stats |>
+  select(variable, mean, median) |>
+  pivot_longer(c(mean, median), names_to = "stat", values_to = "x") |>
   left_join(panel_labels, by = "variable")
 ```
 
@@ -324,11 +324,11 @@ ggplot(plot_data, aes(value)) +
 
 ```{r descriptive-distributions, fig.height=14}
 # density per variable vs a normal curve with the same mean / sd (skewness, kurtosis)
-normal_curves <- desc_stats %>%
-  select(variable, mean, sd) %>%
-  mutate(x = map2(mean, sd, ~ seq(.x - 4 * .y, .x + 4 * .y, length.out = 200))) %>%
-  unnest(x) %>%
-  mutate(density = dnorm(x, mean, sd)) %>%
+normal_curves <- desc_stats |>
+  select(variable, mean, sd) |>
+  mutate(x = map2(mean, sd, ~ seq(.x - 4 * .y, .x + 4 * .y, length.out = 200))) |>
+  unnest(x) |>
+  mutate(density = dnorm(x, mean, sd)) |>
   left_join(panel_labels, by = "variable")
 
 ggplot(plot_data, aes(value)) +
@@ -355,20 +355,27 @@ ggplot(plot_data, aes(x = "", y = value)) +
 
 ```{r correlation-matrix, fig.height=8}
 # pairwise-complete Pearson correlations (January 2018 is NA for 3 variables)
-cor_matrix <- df_econometrics %>%
-  select(all_of(vars)) %>%
+cor_matrix <- df_econometrics |>
+  select(all_of(vars)) |>
   cor(use = "pairwise.complete.obs")
 
-round(cor_matrix, 3) %>%
+round(cor_matrix, 3) |>
   knitr::kable(caption = "Pearson correlation matrix")
 
-# correlation heatmap; blank cells are not significant at the 5% level
+# correlation heatmaps: all coefficients, then with the significance rule applied
 cor_pvalues <- outer(vars, vars, Vectorize(function(a, b) {
   if (a == b) return(0)
   cor.test(df_econometrics[[a]], df_econometrics[[b]])$p.value
 }))
 dimnames(cor_pvalues) <- dimnames(cor_matrix)
 
+# 1. all correlations shown
+corrplot(cor_matrix, method = "color", type = "upper", order = "original",
+         addCoef.col = "black", number.cex = 0.7, tl.col = "black", tl.srt = 45,
+         diag = FALSE, mar = c(0, 0, 2, 0),
+         title = "Correlation matrix (all pairs)")
+
+# 2. blank cells are not significant at the 5% level
 corrplot(cor_matrix, method = "color", type = "upper", order = "original",
          addCoef.col = "black", number.cex = 0.7, tl.col = "black", tl.srt = 45,
          p.mat = cor_pvalues, sig.level = 0.05, insig = "blank",
@@ -376,24 +383,73 @@ corrplot(cor_matrix, method = "color", type = "upper", order = "original",
          title = "Correlation matrix (blank = not significant at 5%)")
 
 # strongest pairs, and PSEI against each candidate regressor
-cor_pairs <- as_tibble(cor_matrix, rownames = "var1") %>%
-  pivot_longer(-var1, names_to = "var2", values_to = "r") %>%
-  filter(match(var1, vars) < match(var2, vars)) %>%
+cor_pairs <- as_tibble(cor_matrix, rownames = "var1") |>
+  pivot_longer(-var1, names_to = "var2", values_to = "r") |>
+  filter(match(var1, vars) < match(var2, vars)) |>
   arrange(desc(abs(r)))
 
-cor_pairs %>%
-  slice_head(n = 10) %>%
-  mutate(r = round(r, 3)) %>%
+cor_pairs |>
+  slice_head(n = 10) |>
+  mutate(r = round(r, 3)) |>
   knitr::kable(caption = "Ten strongest pairwise correlations")
 
-cor_pairs %>%
-  filter(var1 == "PSEI") %>%
-  mutate(r = round(r, 3)) %>%
+cor_pairs |>
+  filter(var1 == "PSEI") |>
+  mutate(r = round(r, 3)) |>
   knitr::kable(caption = "Correlation of PSEI with each candidate regressor")
 
 # multicollinearity screen among regressors
-cor_pairs %>%
-  filter(var1 != "PSEI", abs(r) > 0.7) %>%
-  mutate(r = round(r, 3)) %>%
+cor_pairs |>
+  filter(var1 != "PSEI", abs(r) > 0.7) |>
+  mutate(r = round(r, 3)) |>
   knitr::kable(caption = "Regressor pairs with |r| > 0.7 (multicollinearity flag)")
+```
+
+
+
+```{r initial-mlr}
+# Initial model: PSEI_t = b0 + b1 SP500_t + b2 USD_PHP_t + b3 BSP_RRP_Rate_t
+#   + b4 PH_10Y_GS_Yield_t + b5 PH_CPI_t + b6 PH_M3_t
+#   + b7 PH_Manufacturing_Production_t + b8 WTI_t + b9 VIX_t + e_t
+regressors <- setdiff(vars, "PSEI")
+mlr_formula <- reformulate(regressors, response = "PSEI")
+mlr_formula
+
+# lm() drops rows with NA (January 2018), so n = 95
+model_initial <- lm(mlr_formula, data = df_econometrics)
+
+# coefficients, standard errors, t-statistics, p-values, 95% confidence intervals
+tidy(model_initial, conf.int = TRUE, conf.level = 0.95) |>
+  transmute(
+    term,
+    estimate,
+    std_error = std.error,
+    t_stat    = statistic,
+    p_value   = if_else(p.value < 0.0001, "<0.0001", as.character(signif(p.value, 3))),
+    ci_lower  = conf.low,
+    ci_upper  = conf.high,
+    signif    = case_when(p.value < 0.01 ~ "***", p.value < 0.05 ~ "**",
+                          p.value < 0.10 ~ "*", TRUE ~ "")
+  ) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 4))) |>
+  knitr::kable(caption = "Initial MLR: PSEI on 9 regressors (OLS)")
+
+# R-squared, adjusted R-squared and the overall F-test
+model_fstat <- summary(model_initial)$fstatistic
+
+glance(model_initial) |>
+  transmute(
+    n                = nobs,
+    r_squared        = r.squared,
+    adj_r_squared    = adj.r.squared,
+    residual_std_err = sigma,
+    f_statistic      = statistic,
+    f_df_numerator   = model_fstat[["numdf"]],
+    f_df_denominator = model_fstat[["dendf"]],
+    f_p_value        = if_else(p.value < 0.0001, "<0.0001", as.character(signif(p.value, 3)))
+  ) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 4))) |>
+  pivot_longer(everything(), names_to = "statistic", values_to = "value",
+               values_transform = as.character) |>
+  knitr::kable(caption = "Model fit and overall F-test (H0: all slope coefficients = 0)")
 ```
