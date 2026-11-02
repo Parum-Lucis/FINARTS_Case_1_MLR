@@ -1,3 +1,5 @@
+# Macro-Financial Determinants of the Philippine Stock Exchange Index (PSEi) Returns: A Multiple Linear Regression Analysis, 2018-2025
+
 ---
 title: "FINARTS_CO2_G6_Case_1"
 author: "Adrian Denzel Macayan"
@@ -57,6 +59,8 @@ start_date <- ymd("2017-12-01")
 end_date   <- ymd("2025-12-31")
 ```
 
+# Section I: Extract-Transform-Load
+
 ```{r load fred}
 invisible(getSymbols(c("DCOILWTICO", "SP500", "VIXCLS"), src = "FRED", auto.assign = TRUE))
 
@@ -76,7 +80,7 @@ df_us_daily <- tibble(
 excel_date <- function(x) as.Date(as.numeric(x), origin = "1899-12-30")
 
 # 10y bond yield data starts at 19th row, 12/17-12/25
-ph_10y_raw <- read_excel("PH_10Y_GS_YIELD_1825.xlsx", skip = 18)
+ph_10y_raw <- read_excel("PH_10Y_GS_YIELD_1725.xlsx", skip = 18)
 ph_10y_daily <- ph_10y_raw |>
   select(date = Date, PH_10Y_GS_Yield = `Yield to Maturity`) |>
   mutate(
@@ -86,7 +90,7 @@ ph_10y_daily <- ph_10y_raw |>
   filter(!is.na(date) & between(date, start_date, end_date))
 
 # PSEI data starts at 33rd row, 12/17-12/25
-psei_raw <- read_excel("PSEI_1825.xlsx", skip = 32)
+psei_raw <- read_excel("PSEI_1725.xlsx", skip = 32)
 psei_daily <- psei_raw |>
   select(date = `Exchange Date`, PSEI = Close) |>
   mutate(
@@ -96,7 +100,7 @@ psei_daily <- psei_raw |>
   filter(!is.na(date) & between(date, start_date, end_date))
 
 # USD/PHP starts at 29th row, 12/17-12/25
-usdphp_raw <- read_excel("USDPHP_1825.xlsx", skip = 28)
+usdphp_raw <- read_excel("USDPHP_1725.xlsx", skip = 28)
 usdphp_daily <- usdphp_raw |>
   select(date = `Exchange Date`, USD_PHP = `Mid Price`) |>
   mutate(
@@ -168,7 +172,7 @@ month_spine <- tibble(
                    floor_date(end_date, "month"), by = "month")
 )
 
-# BSP RRP rate in force at each month-end (rate changes on meeting dates)
+# BSP RRP rate in force at each month-end
 rrp_monthly <- month_spine |>
   mutate(
     month_end    = ceiling_date(year_month, "month") - days(1),
@@ -240,6 +244,8 @@ df_econometrics |>
               function(...) paste(names(c(...))[is.na(c(...))], collapse = ", "))) |>
   knitr::kable(caption = "Months with missing values")
 ```
+
+# Section II: Exploratory Data Analysis
 
 ```{r descriptive-stats}
 # math functions
@@ -394,6 +400,8 @@ cor_pairs |>
   knitr::kable(caption = "Ten strongest pairwise correlations")
 
 ```
+
+# Section III: Baseline Multiple Linear Regression
 
 ```{r initial-mlr}
 # Initial model: MLR Model: PSEI_t = b0 + b1 SP500_t + b2 USD_PHP_t + b3 BSP_RRP_Rate_t + b4 PH_10Y_GS_Yield_t + b5 PH_CPI_t + b6 PH_M3_t + b7 PH_Manufacturing_Production_t + b8 WTI_t + b9 VIX_t + e_t
@@ -603,6 +611,8 @@ imap(joint_groups, function(group, name) {
   knitr::kable(caption = "Joint F-tests on groups of coefficients (alpha = 0.05)")
 ```
 
+# Section IV: Model Evaluation
+
 ```{r model-fit}
 # Candidate models, all estimated on the same complete-case sample (n = 95)
 regs_core     <- c("USD_PHP", "PH_10Y_GS_Yield", "WTI")
@@ -781,6 +791,8 @@ for (i in seq_len(nrow(step_specs))) {
   cat("\n\n")
 }
 ```
+
+# Section V: Regression Diagnostics
 
 ```{r diagnostics-setup}
 # Diagnostics for model_initial (full 9-regressor OLS). Data used in the fit, with
@@ -1198,6 +1210,8 @@ robust_results |>
   theme(legend.position = "none", strip.text = element_text(face = "bold"))
 ```
 
+# Section VI: Model Improvement
+
 ```{r remedy-setup}
 # Data and helpers for the corrective steps. Everything is estimated on the same
 # months and the same dependent variable (PSEI), so the models are comparable.
@@ -1500,3 +1514,7 @@ ggplot(ci_models, aes(y = model, colour = model)) +
   theme_minimal() +
   theme(legend.position = "none", strip.text = element_text(face = "bold"))
 ```
+
+# Section VII: Financial Interpretation
+
+# Section VIII: Financial Recommendation
