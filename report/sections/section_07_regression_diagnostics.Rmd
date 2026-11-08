@@ -1,0 +1,451 @@
+# Section 7: Regression Diagnostics
+
+```{r diagnostics-setup}
+# Diagnostics for model_initial (full 9-regressor OLS). Data used in the fit, with the month of each observation, so residual-based results can be traced to dates.
+diag_resid <- residuals(model_initial)
+
+# a plain data frame whose row names match the model's, which lmtest::bptest needs to align auxiliary-regression data with the model frame
+df_diag <- as.data.frame(df_model)
+stopifnot(identical(rownames(df_diag), names(diag_resid)))
+
+diag_fit   <- fitted(model_initial)
+diag_n     <- nobs(model_initial)
+diag_k     <- length(coef(model_initial))     # parameters, incl. intercept
+
+# one-row summary of an htest object
+htest_row <- function(label, h) tibble(
+  test      = label,
+  statistic = unname(h$statistic),
+  df        = paste(h$parameter, collapse = ", "),
+  p_value   = fmt_p(h$p.value),
+  decision  = if_else(h$p.value < alpha, "Reject H0", "Fail to reject H0")
+)
+```
+
+The inference reported so far rests on assumptions about the errors of the regression. The standard errors, t statistics and F tests are valid only if the error variance is constant and the errors are serially uncorrelated; exact small-sample inference also needs normal errors; the coefficients are unbiased only if the functional form is right; and each coefficient is informative only if the regressors are not too collinear and no single month dominates the fit. This section examines each assumption on the residuals of the nine-regressor baseline model, using the monthly PSEi returns of January 2018 to December 2025.
+
+In testing, we have two working questions. The first is which assumptions hold, and most do: the regressors are not collinear, the residuals are serially uncorrelated and close to normal, and the coefficients are stable across the sample. The second is whether the exceptions are separate defects or one. Three checks flag a problem, namely unequal error variance, a functional form that the data reject and a few influential observations, and a sample that contains the COVID-19 market crash of March 2020 invites the question whether they share a source. The answer decides the remedy, since three independent defects would call for three corrections and one extreme month for a single targeted one. The tests are reported in the order of the assumptions, alongside the residual plots that show where in the sample a problem lies when a test says only that it exists, and the question is taken up when the influential observations are examined.
+
+## Heteroskedascticity 
+```{r heteroskedasticity, fig.height=4, fig.cap=c("Initial model: residuals against fitted values", "Initial model: scale-location plot, square root of the absolute standardised residuals against fitted values")}
+# H0: errors are homoskedastic; H1: the error variance depends on the regressors (or on the fitted values for the White-type test). Rejecting H0 means classical standard errors are unreliable.
+
+white_vars <- reformulate(c(
+  paste0("(", paste(regressors, collapse = " + "), ")^2"),
+  paste0("I(", regressors, "^2)")
+))
+
+df_het <- mutate(df_diag, fit = diag_fit)
+
+bind_rows(
+  htest_row("Breusch-Pagan (studentized / Koenker)", bptest(model_initial, studentize = TRUE)),
+  htest_row("Breusch-Pagan (non-studentized)",       bptest(model_initial, studentize = FALSE)),
+  htest_row("White-type (fitted, fitted^2)",
+            bptest(model_initial, ~ fit + I(fit^2), data = df_het)),
+  htest_row("White (regressors, squares, cross-products)",
+            bptest(model_initial, white_vars, data = df_diag))
+) |>
+  mutate(statistic = signif(statistic, 4)) |>
+  fit_kable(caption = "Heteroskedasticity tests (H0: homoskedastic errors)")
+
+# residuals vs fitted values, and scale-location (spread of residuals vs fitted)
+het_data <- tibble(fitted = diag_fit, resid = diag_resid,
+                   sqrt_abs_std = sqrt(abs(rstandard(model_initial))))
+
+ggplot(het_data, aes(fitted, resid)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "firebrick") +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "loess", se = FALSE, colour = "steelblue", formula = y ~ x) +
+  labs(title = "Residuals vs fitted values", x = "Fitted PSEI return", y = "Residual") +
+  theme_minimal()
+
+ggplot(het_data, aes(fitted, sqrt_abs_std)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "loess", se = FALSE, colour = "steelblue", formula = y ~ x) +
+  labs(title = "Scale-location", x = "Fitted PSEI return",
+       y = "sqrt(|standardised residual|)") +
+  theme_minimal()
+```
+
+Constant error variance underpins the classical standard errors. The Breusch-Pagan test [@breusch_simple_1979] in its studentized form [@koenker_note_1981] rejects at the 5 percent level, with a statistic of 18.97 on 9 degrees of freedom (p = 0.0254), and so does the non-studentized version (21.67, p = 0.010). The White test [@white_heteroskedasticity-consistent_1980] on squares and cross-products of the regressors does not reject (p = 0.487), and neither does a White-type test on the fitted values and their square (p = 0.125).
+
+The disagreement is informative. The White test regresses the squared residuals on 54 terms with only 96 observations, so it has little power against a moderate departure, whereas the Breusch-Pagan test uses 9 degrees of freedom and is the more sensitive test here. Together, they point to unequal variance of moderate strength and not to a gross failure. The plots show where the extra variance lies. The residuals scatter around zero with no strong pattern, but the spread is widest, and the points sparsest, at the lowest fitted returns, and the scale-location curve rises only at its left end. The variance is therefore not growing steadily with the level of the return; it is larger in the few months with the most negative fitted returns, and in the three months from March to May 2020 the residual standard deviation is 6.3 percentage points against 3.8 in all other months.
+
+Unequal variance of this kind is what is expected of equity returns, whose volatility rises in turbulent markets and clusters in time [@engle_autoregressive_1982]. Its consequence is for inference, not estimation: the coefficients remain unbiased, but the classical standard errors can understate their uncertainty, so that a variable looks more reliable than it is. That is a risk above all for exposures estimated from a crisis month, and it is why robust standard errors are applied to this model in the model-improvement section. Whether the extra variance belongs to the crisis months alone is taken up with the influential observations.
+
+## Autocorrelation
+```{r autocorrelation, fig.height=4, fig.cap=c("Initial model: residuals in month order", "Initial model: autocorrelation function of the residuals")}
+# H0: no serial correlation in the errors; H1: first-order (DW) or up-to-order-p(Breusch-Godfrey) autocorrelation. Rows are in month order.
+
+dw_value <- unname(dwtest(model_initial)$statistic)
+
+bind_rows(
+  htest_row("Durbin-Watson (H1: positive autocorrelation)", dwtest(model_initial, alternative = "greater")),
+  htest_row("Durbin-Watson (H1: two-sided)", dwtest(model_initial, alternative = "two.sided")),
+  htest_row("Breusch-Godfrey, order 1",  bgtest(model_initial, order = 1)),
+  htest_row("Breusch-Godfrey, order 3",  bgtest(model_initial, order = 3)),
+  htest_row("Breusch-Godfrey, order 6",  bgtest(model_initial, order = 6)),
+  htest_row("Breusch-Godfrey, order 12", bgtest(model_initial, order = 12)),
+  htest_row("Ljung-Box, 6 lags (residuals)",  Box.test(diag_resid, lag = 6,  type = "Ljung-Box")),
+  htest_row("Ljung-Box, 12 lags (residuals)", Box.test(diag_resid, lag = 12, type = "Ljung-Box"))
+) |>
+  mutate(statistic = signif(statistic, 4)) |>
+  fit_kable(caption = paste0("Autocorrelation tests (H0: no serial correlation). ",
+                                "DW = ", round(dw_value, 3),
+                                "; implied lag-1 correlation ≈ ", round(1 - dw_value / 2, 3)))
+
+# residuals over time, and residual autocorrelation function
+tibble(year_month = df_diag$year_month, resid = diag_resid) |>
+  ggplot(aes(year_month, resid)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "firebrick") +
+  geom_line(colour = "grey40") +
+  geom_point(size = 1.2) +
+  labs(title = "Residuals over time", x = NULL, y = "Residual") +
+  theme_minimal()
+
+acf_res <- acf(diag_resid, lag.max = 24, plot = FALSE)
+tibble(lag = as.numeric(acf_res$lag)[-1], acf = as.numeric(acf_res$acf)[-1]) |>
+  ggplot(aes(lag, acf)) +
+  geom_col(fill = "steelblue", width = 0.5) +
+  geom_hline(yintercept = c(-1, 1) * qnorm(0.975) / sqrt(diag_n),
+             linetype = "dashed", colour = "firebrick") +
+  geom_hline(yintercept = 0) +
+  labs(title = "Residual ACF", subtitle = "dashed lines: 95% bounds under no autocorrelation",
+       x = "Lag (months)", y = "Autocorrelation") +
+  theme_minimal()
+```
+
+Autocorrelation is relevant here because the data are a monthly time series. If returns, or the drivers of returns that the model omits, persisted from one month to the next, the residuals would be serially correlated and the standard errors would be biased in a direction set by the sign of the correlation. The Durbin-Watson statistic is 2.105 [@durbin_testing_1950], against 2 for no autocorrelation, and implies a first-order correlation of about -0.05; its p-values are 0.552 against positive autocorrelation and 0.896 against either sign. The Breusch-Godfrey tests [@breusch_testing_1978; @godfrey_testing_1978] at lags 1, 3, 6 and 12 give p-values of 0.484, 0.794, 0.445 and 0.425, and the Ljung-Box tests [@ljung_measure_1978] at 6 and 12 lags give 0.556 and 0.692. The Durbin-Watson test is designed for first-order dependence, which is why the higher-order Breusch-Godfrey tests and the Ljung-Box tests are added to cover the longer lags that monthly data can show.
+
+The plots agree. The residuals in month order fluctuate around zero without runs of one sign, and none of the first 24 sample auto-correlations lies outside the 95 percent band; the largest, 0.19 at lag 23, is just inside the band of 0.20 and has no economic interpretation.
+
+The result is what is expected of a market that incorporates information quickly. If last month's unexplained return helped to predict this month's, an investor could trade on the pattern. Serial dependence in index returns has been documented at short horizons [@lo_stock_1988], but at the monthly frequency used here the residuals show none, so the nine regressors leave nothing systematic of that kind behind. No correction for autocorrelation is needed as a remedy.
+
+## Non-Normality
+```{r non-normality, fig.height=4, fig.cap=c("Initial model: normal Q-Q plot of the residuals", "Initial model: residual density against a normal curve")}
+# H0: residuals are normally distributed. Normality matters for exact t/F inference in small samples; with large n, OLS inference is asymptotically valid.
+
+res_skew   <- skewness(diag_resid)
+res_exkurt <- excess_kurtosis(diag_resid)
+
+# Jarque-Bera: JB = n/6 * (S^2 + (excess K)^2 / 4) ~ chi-square(2) under H0
+jb_stat <- diag_n / 6 * (res_skew^2 + res_exkurt^2 / 4)
+jb_test <- list(statistic = c(JB = jb_stat), parameter = c(df = 2),
+                p.value = pchisq(jb_stat, df = 2, lower.tail = FALSE))
+
+bind_rows(
+  htest_row("Shapiro-Wilk", shapiro.test(diag_resid)),
+  htest_row("Jarque-Bera",  jb_test)
+) |>
+  mutate(statistic = signif(statistic, 4)) |>
+  fit_kable(caption = sprintf(
+    "Normality tests on residuals (skewness = %.3f, excess kurtosis = %.3f)",
+    res_skew, res_exkurt))
+
+# Q-Q plot and residual histogram with a normal curve
+ggplot(tibble(resid = diag_resid), aes(sample = resid)) +
+  stat_qq(alpha = 0.7) +
+  stat_qq_line(colour = "firebrick") +
+  labs(title = "Normal Q-Q plot of residuals",
+       x = "Theoretical quantiles", y = "Sample quantiles") +
+  theme_minimal()
+
+ggplot(tibble(resid = diag_resid), aes(resid)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 20, fill = "grey70", colour = "white") +
+  stat_function(fun = dnorm, args = list(mean = mean(diag_resid), sd = sd(diag_resid)),
+                colour = "firebrick", linetype = "dashed") +
+  labs(title = "Residual distribution vs normal", x = "Residual", y = "Density") +
+  theme_minimal()
+```
+
+Normality matters for exact t and F inference in a sample of 96 months. The Shapiro-Wilk test [@shapiro_analysis_1965] gives 0.9863 (p = 0.421) and the Jarque-Bera test [@jarque_efficient_1980] gives 0.4545 (p = 0.797); neither rejects. Non-normal errors would not bias the coefficients, but they would make the t and F p-values approximate and could signal the fat tails that undermine risk statements built on normality. The residual skewness is -0.09 and the excess kurtosis 0.28, and the normal Q-Q plot follows the reference line closely, with small departures only at the two extremes.
+
+These figures are striking beside those of the raw returns, whose skewness is -0.94 and excess kurtosis 2.0. The long left tail of the PSEi return, the mark of crash months, has almost disappeared from the residuals, which means that much of that tail is associated with the regressors, chiefly the exchange rate, the yield and oil, which move with the index in a sell-off. A large part of the left-tail risk is therefore systematic with respect to observable prices and not idiosyncratic, and for an investor, that is the part that can be monitored and hedged.
+
+The distribution of the residuals raises no concern for inference. The largest studentized residual, -3.7, belongs to March 2020, but one month does not disturb the tests, and the t and F distributions are reliable for 96 observations with errors this close to normal. Nothing in this check calls for a remedy.
+
+## Functional Form (Ramsey RESET)
+```{r functional-form-reset}
+# Ramsey RESET: H0: the linear functional form is correctly specified (powers of the fitted values / regressors add no explanatory power); H1: omitted non-linearity
+
+bind_rows(
+  htest_row("RESET: fitted^2",           resettest(model_initial, power = 2,   type = "fitted")),
+  htest_row("RESET: fitted^2, fitted^3", resettest(model_initial, power = 2:3, type = "fitted")),
+  htest_row("RESET: fitted^2 to fitted^4", resettest(model_initial, power = 2:4, type = "fitted")),
+  htest_row("RESET: squares of regressors", resettest(model_initial, power = 2, type = "regressor"))
+) |>
+  mutate(statistic = signif(statistic, 4)) |>
+  fit_kable(caption = "Ramsey RESET specification tests (H0: correct functional form)")
+```
+
+The RESET test [@ramsey_tests_1969] asks whether powers of the fitted values add explanatory power. If they do, the linear specification has missed non-linearity or an omitted variable, and the coefficients may be biased. Adding the square of the fitted values gives F = 4.35 (p = 0.040), adding the square and cube gives 4.09 (p = 0.020), and adding powers two to four gives 5.41 (p = 0.002), so all three reject linearity. Adding the squares of the regressors themselves gives 1.29 (p = 0.257) and does not. RESET detects a misspecification without saying what the right form is, so a rejection has to be read together with the plots and the influence measures.
+
+The split in the results is informative. The tests that reject work through the fitted values, which are dominated by the exchange rate, the yield and oil, while the test on the squares of the individual regressors finds no curvature in any one relationship, such as a convex response to oil. A rejection of the first kind can reflect a genuinely different functional form or a few observations that a linear fit cannot accommodate. The residual plot favors the second reading: its smoother bends mainly at the sparse left end, where a handful of months with the most negative fitted returns determine its shape.
+
+The distinction matters for what an investor should do. If the relation between returns and the regressors were truly non-linear, for example if the index responded more than proportionally to large exchange-rate moves, exposures estimated from ordinary months would understate the risk in stress. If instead the rejection comes from one episode, the exposures are sound for ordinary months and the episode needs separate treatment. The two readings call for different remedies, a transformation or interaction terms in the first case and an adjustment for the episode in the second, and the result is carried to the model-improvement section.
+
+## Multicollinearity (VIF)
+```{r multicollinearity-vif, fig.height=4, fig.cap="Variance inflation factor of each regressor (dashed lines = 5, moderate, and 10, severe)"}
+# VIF_j = 1 / (1 - R2_j), where R2_j is from regressing X_j on the other regressors
+# Rules of thumb: >= 5 moderate, >= 10 severe collinearity.
+vif_values <- car::vif(model_initial)
+
+vif_table <- tibble(
+  variable  = names(vif_values),
+  VIF       = as.numeric(vif_values),
+  tolerance = 1 / VIF,
+  R2_on_others = 1 - tolerance,
+  flag      = case_when(VIF >= 10 ~ "severe (>= 10)", VIF >= 5 ~ "moderate (>= 5)",
+                        TRUE ~ "low (< 5)")
+) |>
+  arrange(desc(VIF))
+
+vif_table |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  fit_kable(caption = sprintf("Variance inflation factors (mean VIF = %.3f)", mean(vif_values)))
+
+# condition number of the standardised design matrix (> 30 suggests collinearity)
+x_std <- scale(model.matrix(model_initial)[, -1])
+sv    <- svd(x_std)$d
+tibble(statistic = c("Largest / smallest singular value (condition number)"),
+       value = round(max(sv) / min(sv), 3)) |>
+  fit_kable(caption = "Condition number of the standardised regressors")
+
+ggplot(vif_table, aes(VIF, reorder(variable, VIF))) +
+  geom_col(fill = "steelblue") +
+  geom_vline(xintercept = c(5, 10), linetype = "dashed", colour = c("orange", "firebrick")) +
+  labs(title = "Variance inflation factors",
+       subtitle = "dashed lines: 5 (moderate) and 10 (severe)", x = "VIF", y = NULL) +
+  theme_minimal()
+```
+
+Multicollinearity does not bias the coefficients but inflates their standard errors, so that a regressor that matters can look insignificant. Two kinds of evidence are used. The correlations among the regressors are modest: the largest, 0.66, is between inflation and the change in the policy rate, while M3 growth correlates at -0.56 with inflation and -0.51 with the policy rate. The variance inflation factors confirm this. Their mean is 1.54, the largest are inflation (2.16), the policy rate (2.01) and M3 growth (1.75), and all nine lie well below the conventional warning level of 5, as does the condition number of the standardized regressors (2.9, against a warning level of 30). A factor of 2.16 means that the variance of that coefficient is 2.16 times what it would be if the regressor were uncorrelated with the others, a standard error about 47 percent larger. These thresholds are rules of thumb and not tests [@obrien_caution_2007], but the margin here is wide.
+
+The three largest factors belong to the three domestic monetary variables, the group that the exploratory correlation analysis singled out, and the overlap has a clear economic source: a central bank raises its policy rate when inflation is high and money growth is slowing, so the three series carry overlapping information about the monetary regime. The overlap is real but mild. The imprecise coefficients of these variables in the baseline model therefore reflect how little they say about monthly returns, not an inability to separate them from one another, and no regressor needs to be dropped or combined to cure multicollinearity.
+
+## Influential Observations
+```{r influence-diagnostics, fig.height=4, fig.cap=c("Initial model: Cook's distance by month (dashed line = 4/n)", "Initial model: leverage against studentised residual, point size = Cook's distance (dashed lines = 2k/n and +/-2)")}
+# Influence Metrics: Cook's distance, leverage (hat values), studentised residuals, DFFITS and DFBETAS. 
+# Cut-offs: Cook's D > 4/n, leverage > 2k/n, |rstudent| > 2,|DFFITS| > 2*sqrt(k/n), |DFBETAS| > 2/sqrt(n).
+
+cut_cook <- 4 / diag_n
+cut_hat  <- 2 * diag_k / diag_n
+cut_rstu <- 2
+cut_dffits <- 2 * sqrt(diag_k / diag_n)
+cut_dfb  <- 2 / sqrt(diag_n)
+
+dfb_mat <- dfbetas(model_initial)
+
+infl_table <- tibble(
+  year_month = df_diag$year_month,
+  cooks_d    = cooks.distance(model_initial),
+  leverage   = hatvalues(model_initial),
+  rstudent   = rstudent(model_initial),
+  dffits     = dffits(model_initial),
+  n_dfbetas_flagged = rowSums(abs(dfb_mat) > cut_dfb)
+) |>
+  mutate(
+    flag_cook = cooks_d > cut_cook,
+    flag_hat  = leverage > cut_hat,
+    flag_rstu = abs(rstudent) > cut_rstu,
+    flag_dffits = abs(dffits) > cut_dffits,
+    n_flags   = flag_cook + flag_hat + flag_rstu + flag_dffits
+  )
+
+tibble(
+  measure = c("Cook's distance", "Leverage", "|Studentised residual|", "|DFFITS|",
+              "Any |DFBETAS|"),
+  cutoff  = c(cut_cook, cut_hat, cut_rstu, cut_dffits, cut_dfb),
+  n_flagged = c(sum(infl_table$flag_cook), sum(infl_table$flag_hat),
+                sum(infl_table$flag_rstu), sum(infl_table$flag_dffits),
+                sum(infl_table$n_dfbetas_flagged > 0)),
+  max_value = c(max(infl_table$cooks_d), max(infl_table$leverage),
+                max(abs(infl_table$rstudent)), max(abs(infl_table$dffits)),
+                max(abs(dfb_mat)))
+) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 4))) |>
+  fit_kable(caption = "Influence measures: cut-offs and number of flagged months")
+
+infl_table |>
+  arrange(desc(cooks_d)) |>
+  slice_head(n = 10) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = "Ten most influential months (by Cook's distance)")
+
+# Cook's distance over time
+ggplot(infl_table, aes(year_month, cooks_d)) +
+  geom_col(aes(fill = flag_cook), width = 25) +
+  geom_hline(yintercept = cut_cook, linetype = "dashed", colour = "firebrick") +
+  scale_fill_manual(values = c("FALSE" = "grey70", "TRUE" = "firebrick"), guide = "none") +
+  labs(title = "Cook's distance by month", subtitle = "dashed line: 4/n",
+       x = NULL, y = "Cook's D") +
+  theme_minimal()
+
+
+# leverage vs studentised residual (point size = Cook's D); flagged months labelled
+ggplot(infl_table, aes(leverage, rstudent)) +
+  geom_hline(yintercept = c(-cut_rstu, cut_rstu), linetype = "dashed", colour = "grey50") +
+  geom_vline(xintercept = cut_hat, linetype = "dashed", colour = "grey50") +
+  geom_point(aes(size = cooks_d, colour = n_flags > 0), alpha = 0.7) +
+  geom_text(data = filter(infl_table, n_flags >= 2),
+            aes(label = format(year_month, "%b %Y")), size = 3, vjust = -1,
+            check_overlap = TRUE) +
+  scale_colour_manual(values = c("FALSE" = "grey50", "TRUE" = "firebrick"),
+                      name = "Flagged by any measure") +
+  scale_size_continuous(name = "Cook's D") +
+  labs(title = "Leverage vs studentised residual",
+       subtitle = "dashed lines: 2k/n (leverage) and +/-2 (studentised residual)",
+       x = "Leverage (hat value)", y = "Studentised residual") +
+  theme_minimal()
+```
+
+A regression can be sound on average and still be dominated by a few observations. Four measures are used: Cook's distance [@cook_detection_1977], which gauges how far the fitted values move when a month is dropped; leverage, which measures how unusual a month's regressors are; the studentized residual, which measures how unusual its return is given the regressors; and DFFITS, which scales the change in a month's own fitted value. At the usual cut-offs, seven months exceed the Cook's distance cut-off of 0.042, ten exceed the leverage cut-off of 0.208, five have studentized residuals beyond 2 in absolute value, and seven exceed the DFFITS cut-off of 0.65.
+
+One month stands apart. March 2020 has a Cook's distance of 1.55, more than five times the next largest (0.28, July 2021); its leverage of 0.57 is nearly three times the cut-off and five times the average of 0.10; and its studentized residual is -3.67 and its DFFITS -4.22. It is not the month with the largest raw residual. The model already assigns it a fitted return of about -15 percent against an actual -24 percent, so its residual of about -9 points is smaller than those of three other months. It is influential because of its leverage and not because it is badly fitted: the fit has bent toward it.
+
+The reason is financial. In March 2020 the S&P 500 had its largest fall, the VIX its highest level and WTI its largest fall of the whole sample, all in the same month, so the month lies far from the other 95 in the space of the regressors. Global shocks arrive together in a crisis, and the regression must estimate its response to them from a single observation. The plot of leverage against studentized residual shows the result, with the other months in a cluster at low leverage and March 2020 alone at the right. The remaining flagged months, May and October 2020 and July and August 2021, are far less influential, with Cook's distances below 0.3.
+
+```{r influence-dfbetas, fig.height=11, fig.cap="Initial model: DFBETAS by month for each coefficient (dashed lines = the cut-off of +/-2/sqrt(n))"}
+# DFBETAS for standardised change in each coefficient when one month is dropped.
+dfb_long <- as_tibble(dfb_mat) |>
+  mutate(year_month = df_diag$year_month) |>
+  pivot_longer(-year_month, names_to = "term", values_to = "dfbeta") |>
+  mutate(term = factor(term, levels = colnames(dfb_mat)),
+         flagged = abs(dfbeta) > cut_dfb)
+
+dfb_long |>
+  group_by(term) |>
+  summarise(
+    n_flagged   = sum(flagged),
+    max_abs     = max(abs(dfbeta)),
+    worst_month = format(year_month[which.max(abs(dfbeta))], "%Y-%m"),
+    .groups = "drop"
+  ) |>
+  mutate(max_abs = signif(max_abs, 3)) |>
+  fit_kable(caption = sprintf("DFBETAS by coefficient (cut-off = 2/sqrt(n) = %.3f)", cut_dfb))
+
+ggplot(dfb_long, aes(year_month, dfbeta)) +
+  geom_col(aes(fill = flagged), width = 25) +
+  geom_hline(yintercept = c(-cut_dfb, cut_dfb), linetype = "dashed", colour = "firebrick") +
+  facet_wrap(~ term, ncol = 2) +
+  scale_fill_manual(values = c("FALSE" = "grey70", "TRUE" = "firebrick"), guide = "none") +
+  labs(title = "DFBETAS by month and coefficient", x = NULL, y = "DFBETAS") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+DFBETAS show which coefficients a month moves. Twenty-two months move at least one coefficient by more than the cut-off of 0.20 standard errors, but March 2020 is in a class of its own: it is the most influential month for five of the ten coefficients, and dropping it would shift the WTI coefficient by 2.3 standard errors and the VIX coefficient by 2.0. The exceptions show that the picture is not about one month alone. The manufacturing production coefficient is moved most, by 1.6 standard errors, by July 2021, and the exchange-rate coefficient, the largest in economic terms, is moved by at most 0.35 standard errors by any month.
+
+Two readings follow forward. The exposures to the exchange rate, and to a lesser extent the yield, are robust to any single month. The apparent sensitivity of returns to oil and to the VIX, by contrast, is largely a statement about March 2020, since dropping that one month would move those coefficients by about two standard errors, enough to change a conclusion. These are exactly the exposures an investor might hedge on the strength of the regression, and they rest on one single observation.
+
+The influential months should not be deleted. March 2020 is a real event, the COVID-19 crash, and not a data error, and deleting it would remove the episode in which risk matters most. The question is how to let the model account for the month without letting it dictate the other coefficients.
+
+The three problems found so far now line up. Unequal variance is concentrated in the crisis months, the fitted-value RESET rejections coincide with a fit bent toward a single point, and the only observation of real influence is that same month. Whether they are three symptoms of one episode is a hypothesis and not yet a result. It is tested directly in the model-improvement section, where a single treatment of March 2020 is tried against all three.
+
+## Parametric Stability
+```{r stability-cusum-chow, fig.height=4.5, fig.cap=c("Initial model: OLS-CUSUM test of parameter stability", "Initial model: recursive CUSUM test of parameter stability", "Initial model: F statistics for a structural break at each candidate date")}
+# Parameter stability. H0: coefficients are constant over the sample.
+# CUSUM tests detect gradual drift
+# Chow tests a break at a known date; 
+# The sup-F Andrews) test searches for an unknown break date.
+
+cusum_ols <- efp(mlr_formula, data = df_diag, type = "OLS-CUSUM")
+cusum_rec <- efp(mlr_formula, data = df_diag, type = "Rec-CUSUM")
+
+# Chow tests: the first segment ends at the given month
+break_dates <- as.Date(c("2020-03-01", "2021-12-01", "2022-04-01"))
+break_labels <- c("after Mar 2020 (COVID-19 shock)",
+                  "after Dec 2021 (sample midpoint)",
+                  "after Apr 2022 (start of BSP tightening)")
+break_idx <- map_int(break_dates, ~ which(df_diag$year_month == .x))
+
+chow_rows <- map2(break_idx, break_labels, function(idx, label) {
+  htest_row(paste0("Chow: ", label),
+            sctest(mlr_formula, data = df_diag, type = "Chow", point = idx))
+})
+
+fs <- Fstats(mlr_formula, data = df_diag, from = 0.15)
+supf <- sctest(fs, type = "supF")
+supf_idx <- breakpoints(fs)$breakpoints
+
+bind_rows(
+  htest_row("OLS-CUSUM", sctest(cusum_ols)),
+  htest_row("Recursive CUSUM", sctest(cusum_rec)),
+  chow_rows,
+  htest_row("sup-F (unknown break date)", supf)
+) |>
+  mutate(statistic = signif(statistic, 4)) |>
+  fit_kable(caption = "Stability tests (H0: stable coefficients)")
+
+tibble(
+  statistic = "Most likely break date from the sup-F search",
+  value = format(df_diag$year_month[supf_idx], "%Y-%m")
+) |>
+  fit_kable(caption = "Estimated break (first segment ends in this month)")
+
+plot(cusum_ols, main = "OLS-CUSUM test of parameter stability")
+plot(cusum_rec, main = "Recursive CUSUM test of parameter stability")
+plot(fs, main = "F statistics for a break at each candidate date")
+```
+
+The last assumption is that the relationship between the regressors and returns is the same throughout the eight years. If it changed, for instance because the pandemic or the tightening of monetary policy from 2022 altered how the market responds to the exchange rate or to yields, one set of coefficients would describe none of the sub-periods. The tests cover different ways in which a relationship can change: the CUSUM tests are sensitive to gradual drift, the Chow test to a break at a known date and the sup-F test to a break at an unknown date. Neither CUSUM test comes close to rejecting (OLS-CUSUM p = 0.958; recursive CUSUM p = 0.246). The Chow tests at the three dates where a break is economically plausible, after March 2020, after December 2021 and after April 2022, give p-values of 0.107, 0.850 and 0.919, and the sup-F test [@andrews_tests_1993] gives a statistic of 20.14 and p = 0.306. The search statistic peaks in August 2020, in the aftermath of the crash, but stays well below the 5 percent critical value at every candidate date.
+
+The stability and influence results fit together. Had the pandemic changed the way the market responds to the regressors, the tests would reject and the sample would need a break dummy or a split. They do not, so we read the crash as an exceptional observation within a stable relationship and not as a new regime, and a one-month adjustment is a better remedy than a split sample. For the investor the implication is reassuring: the exposures estimated over 2018 to 2025 show no sign of having changed across the pandemic and the tightening cycle.
+
+## Diagnostics Summary
+```{r diagnostics-summary}
+# One-page summary of the diagnostics of the initial model: the test results and the action taken. A "Problem" is a rejection at alpha, or a value past the usual rule of thumb.
+
+p_res <- function(p) paste0("p = ", fmt_p(p))
+diag_row <- function(area, test, result, problem, remedy) {
+  tibble(area = area, test = test, result = result,
+         verdict = if_else(problem, "Problem", "No problem"),
+         action  = if_else(problem, remedy, "None needed"))
+}
+
+bp_p    <- bptest(model_initial)$p.value
+white_p <- bptest(model_initial, white_vars, data = df_diag)$p.value
+dw_p    <- dwtest(model_initial, alternative = "two.sided")$p.value
+bg_p    <- bgtest(model_initial, order = 12)$p.value
+lb_p    <- Box.test(diag_resid, lag = 12, type = "Ljung-Box")$p.value
+sw_p    <- shapiro.test(diag_resid)$p.value
+reset_p <- resettest(model_initial, power = 2:3, type = "fitted")$p.value
+cusum_p <- sctest(cusum_ols)$p.value
+cond_no <- max(sv) / min(sv)
+n_cook  <- sum(infl_table$flag_cook)
+
+diag_tab <- bind_rows(
+  diag_row("Multicollinearity", "Largest VIF (flag at 5)", sprintf("%.2f", max(vif_values)),
+           max(vif_values) >= 5, "Drop or combine regressors"),
+  diag_row("Multicollinearity", "Condition number (flag at 30)", sprintf("%.1f", cond_no),
+           cond_no > 30, "Drop or combine regressors"),
+  diag_row("Heteroskedasticity", "Breusch-Pagan (studentized)", p_res(bp_p),
+           bp_p < alpha, "HC3 robust standard errors (Section 8)"),
+  diag_row("Heteroskedasticity", "White (squares and cross-products)", p_res(white_p),
+           white_p < alpha, "HC3 robust standard errors (Section 8)"),
+  diag_row("Autocorrelation", "Durbin-Watson (two-sided)", p_res(dw_p),
+           dw_p < alpha, "Newey-West standard errors"),
+  diag_row("Autocorrelation", "Breusch-Godfrey, order 12", p_res(bg_p),
+           bg_p < alpha, "Newey-West standard errors"),
+  diag_row("Autocorrelation", "Ljung-Box, 12 lags", p_res(lb_p),
+           lb_p < alpha, "Newey-West standard errors"),
+  diag_row("Normality", "Shapiro-Wilk", p_res(sw_p),
+           sw_p < alpha, "Robust regression (Section 8)"),
+  diag_row("Specification", "RESET (fitted^2, fitted^3)", p_res(reset_p),
+           reset_p < alpha, "March 2020 dummy (Section 8)"),
+  diag_row("Influence", "Cook's distance above 4/n",
+           sprintf("%d months, largest %.2f", n_cook, max(infl_table$cooks_d)),
+           n_cook > 0, "March 2020 dummy and robust regression (Section 8)"),
+  diag_row("Stability", "OLS-CUSUM", p_res(cusum_p),
+           cusum_p < alpha, "Break dummy or split sample"),
+  diag_row("Stability", "sup-F (unknown break date)", p_res(supf$p.value),
+           supf$p.value < alpha, "Break dummy or split sample")
+)
+
+# each area is named once, on its first row, with a rule under its last row
+rule_after <- head(which(diag_tab$area != lead(diag_tab$area, default = "")), -1)
+diag_tab |>
+  mutate(area = if_else(duplicated(area), "", area)) |>
+  fit_kable(caption = "Diagnostics summary for the initial model (alpha = 0.05)", rule_after = rule_after)
+```
+

@@ -1,0 +1,246 @@
+# Section 6: Model Evaluation
+
+We note that a regression model is evaluated by what it adds, not by how much it fits. R-squared never falls when a regressor is added, so the specification with the most regressors always has the largest R-squared, whether or not the added regressors carry any information about returns. This section therefore asks of every candidate model what R-squared cannot answer: whether the extra complexity is necessary, in the sense that matters to an investor, which is the ability to describe returns that were not used to fit the model. The tools are the ones the problem calls for. Adjusted R-squared and a leave-one-out predicted R-squared correct fit for complexity; the Akaike and Bayesian information criteria (AIC and BIC) price each additional parameter; nested F and Wald tests examine whether a block of coefficients is jointly zero; and a step-wise search checks whether an algorithm that knows nothing about finance can recover the same specification.
+
+The candidate models are not arbitrary subsets of the data. Each one is a statement about what moves the Philippine equity market. The intercept-only model says that nothing observable does. The core model says that three market prices, the exchange rate, the 10-year yield and oil, carry the information. The domestic macro model says that fundamentals, namely the policy rate, inflation, money growth and manufacturing output, do. The market-related model adds global equity returns and volatility to the core, and the full model includes everything. Comparing them is therefore a comparison of economic hypotheses, and the result has a direct use: it decides which variables an investor should monitor and how much of the variation in monthly returns can be attributed to them.
+
+## Candidate Models
+
+The five candidates form a nested family, which is what makes formal comparison possible. Every model is estimated on the same 96 monthly observations, so differences in fit reflect differences in specification and not differences in sample. The intercept-only model is nested in all the others; the core model is nested in the market-related and full models; the market-related model is nested in the full model; and the domestic macro model is nested in the full model but not in the core or market-related models, which makes it a rival hypothesis and not a subset. The subsections below state each hypothesis, its members and its economic reasoning before any statistics are shown.
+
+We show of two features of the construction. First, the core model was assembled from the three regressors that were individually significant in the full model, so it is a model chosen after looking at the data. A preference for it over the full model is partly mechanical, because a set selected for strong t statistics will tend to look better than the set that remains, and the comparisons that follow cannot fully remove that advantage. Second, the number of parameters matters at this sample size: the full model spends 11 parameters, the nine slopes, the intercept and the error variance, on 96 observations, roughly one for every nine, which is why the criteria that penalize complexity carry significant weight in this section.
+
+### Intercept Only
+
+The intercept-only model is the hypothesis that none of the nine regressors helps to describe monthly returns, so that the best description of any month's return is the average return. It is the benchmark that every other model must beat, and it is the counterpart of the historical-mean forecast that @welch_comprehensive_2008 show to be hard to outperform in equity return prediction. By construction its R-squared is zero and its in-sample error equals the standard deviation of the return, about 5.9 percentage points. Its leave-one-out predicted R-squared is slightly negative (-0.021), which records that predicting each month with the mean of the other 95 is marginally worse than using the full-sample mean, a reminder that even the simplest model carries estimation error. In financial terms it is the hypothesis that a month's return is unrelated to that month's macro-financial conditions. Because the regressors are measured in the same month as the return, rejecting it shows that returns move with contemporaneous conditions.
+
+### Core Regressors
+
+The core model is the financial-prices hypothesis: monthly returns on the Philippine equity market are explained by three market prices, the USD/PHP exchange rate, the 10-year government bond yield and WTI crude oil. Each stands for a distinct transmission channel. The exchange rate captures the peso value of foreign-currency earnings and the portfolio decisions of foreign investment. The yield is the discount rate applied to future cash flows and the opportunity cost of holding equities. Oil carries commodity and global-demand information into a market that relies heavily on imported fuel, with the sign ambiguity noted in the coefficient analysis [@kilian_impact_2009]. These are the three regressors whose coefficients were individually significant in the baseline model, and the same three that the joint test found significant under every covariance estimator. With three slopes, an intercept and the error variance, the model spends five parameters, fewer than half of the full model's eleven.
+
+### Domestic Macro 4
+
+The domestic macro model is the fundamentals hypothesis: returns follow the domestic policy and real-economy environment, measured by changes in the BSP reverse repurchase rate, consumer price inflation, M3 money growth and manufacturing production growth. It deliberately differs from the three-variable domestic group tested in the baseline section, because it includes the policy rate, which a fundamentals story cannot omit. The hypothesis has long standing in finance, since @fama_stock_1981 tied stock returns to inflation, real activity and money. It is also the hypothesis that a monthly frequency treats least kindly: inflation, money growth and production enter as year-on-year rates that change slowly and carry little new information from one month to the next, while equity prices respond to news [@chen_economic_1986]. The model is not nested in the core or market-related specifications, so it is a genuine rival and not a restricted version of them, and its nested comparison with the full model shows what the financial variables add to it.
+
+### Market-related Regressor
+
+The market-related model is the global risk-appetite hypothesis: on top of the three core prices, Philippine returns also respond to the S&P 500, which carries global equity returns, and to the VIX, which measures expected volatility and risk aversion in global markets. There is good reason to expect both to matter. Equity markets are interdependent across borders [@forbes_no_2002], and the VIX is closely tied to the price of risk [@bekaert_vix_2014]. The model nests the core model as the restriction that the two additional coefficients are zero, so the evidence on this hypothesis is the incremental contribution of the S&P 500 and the VIX once the exchange rate, the yield and oil are already in the model. What is at stake is whether global sentiment has an independent effect on the Philippine market or reaches it through the prices already in the core, since a global risk-off episode typically weakens the peso and lifts local yields at the same time.
+
+### Full-set Regressor
+
+The full model is the kitchen-sink hypothesis: all nine regressors enter and nothing is excluded in advance. It is the most flattering specification, because adding regressors can only raise R-squared, and for that reason it serves as the reference against which the more parsimonious models are judged and not as a candidate that wins by default. Its role in the comparison is to show whether the regressors left out of the smaller models, the S&P 500, the VIX, the policy rate, inflation, M3 growth and manufacturing production, contribute explanatory power that the smaller models lack. The cost of including them is statistical as well as practical. With 11 parameters on 96 observations the coefficients are estimated with more noise, and the baseline analysis has already shown that each of the six extra coefficients is individually indistinguishable from zero. The comparison below weighs the full model's slightly higher fit against that noise.
+
+```{r model-fit}
+# Candidate models, all estimated on the same complete-case sample (n is in the fit table)
+regs_core     <- c("USD_PHP", "PH_10Y_GS_Yield", "WTI")
+regs_domestic <- c("BSP_RRP_Rate", "PH_CPI", "PH_M3", "PH_Manufacturing_Production")
+regs_market   <- c("USD_PHP", "PH_10Y_GS_Yield", "WTI", "SP500", "VIX")
+
+candidate_models <- list(
+  "M0: intercept only"             = lm(PSEI ~ 1, data = df_model),
+  "M1: core 3"                     = lm(reformulate(regs_core, "PSEI"), data = df_model),
+  "M2: domestic macro"             = lm(reformulate(regs_domestic, "PSEI"), data = df_model),
+  "M3: market-related"             = lm(reformulate(regs_market, "PSEI"), data = df_model),
+  "M4: full 9"                     = model_initial
+)
+
+# In-sample fit. Predicted R-squared uses the leave-one-out PRESS statistic.
+tss <- sum((df_model$PSEI - mean(df_model$PSEI))^2)
+
+imap(candidate_models, function(m, name) {
+  g     <- glance(m)
+  press <- sum((residuals(m) / (1 - hatvalues(m)))^2)
+  tibble(
+    model               = name,
+    n                   = nobs(m),
+    n_regressors        = length(coef(m)) - 1,
+    r_squared           = g$r.squared,
+    adj_r_squared       = g$adj.r.squared,
+    predicted_r_squared = 1 - press / tss,
+    rmse_in_sample      = sqrt(mean(residuals(m)^2)),
+    residual_std_err    = g$sigma,
+    f_statistic         = g$statistic,
+    f_p_value           = fmt_p(g$p.value)
+  )
+}) |>
+  bind_rows() |>
+  mutate(across(where(is.numeric), ~ signif(.x, 4))) |>
+  fit_kable(caption = "In-sample fit of the candidate models")
+```
+
+The in-sample fit table reports four measures that answer different questions. R-squared is the share of the sample variation in returns that the fitted equation accounts for, and it cannot fall when a regressor is added. Adjusted R-squared charges for each added regressor and rises only if the added regressor's t statistic exceeds one in absolute value, or, for a block of regressors, if the block's F statistic exceeds one. Predicted R-squared uses the leave-one-out prediction error, the PRESS statistic [@allen_relationship_1974], so that each month is predicted from a model fitted to the other 95; it is the closest of the four to a test on data the model has not seen. The in-sample root mean squared error restates fit in return units.
+
+The ranking by R-squared and the ranking by the other measures point in opposite directions. R-squared rises from 0.546 for the core model to 0.556 for the market-related model and 0.572 for the full model, and the in-sample error falls from 4.00 to 3.88 percentage points, a gain of about 3 percent. Adjusted R-squared does not move (0.531, 0.531 and 0.528), and predicted R-squared falls steadily, from 0.453 to 0.393 and 0.338. The six extra regressors therefore buy a 0.027 gain in R-squared and a 3 percent lower in-sample error, and they cost 0.116 of predicted R-squared. Selecting the full model because it has the largest R-squared would reward exactly the noise that the leave-one-out measure penalizes. The domestic macro model confirms the point from the other side: with an R-squared of 0.011, a negative adjusted R-squared (-0.033) and a negative predicted R-squared (-0.178), it cannot be distinguished from the intercept-only model (F-test p = 0.911).
+
+The figures also have a financial reading. R-squared is the share of the variance of monthly returns that is associated with the model's regressors, so the core model attributes about 55 percent of return variance to the exchange rate, the yield and oil in sample, and about 45 percent on the leave-one-out measure. If the estimated associations were stable, a hedge that neutralized those three exposures would remove roughly that share of the variance, and what remains, a residual standard deviation of about 4.1 percentage points a month, is risk that these three prices do not explain. The leave-one-out figure is the more cautious of the two, although it is still optimistic for the core model because its regressors were chosen with the same data.
+
+## AIC-BIC
+```{r aic-bic}
+# Information criteria: lower is better. Delta = difference from the best model.
+# AICc corrects AIC for small samples; weights are relative model probabilities.
+
+ic <- imap(candidate_models, function(m, name) {
+  k <- attr(logLik(m), "df") # estimated parameters which includes the error var.
+  tibble(
+    model  = name,
+    k      = k,
+    logLik = as.numeric(logLik(m)),
+    AIC    = AIC(m),
+    AICc   = AIC(m) + 2 * k * (k + 1) / (nobs(m) - k - 1),
+    BIC    = BIC(m)
+  )
+}) |>
+  bind_rows() |>
+  mutate(
+    delta_AIC   = AIC  - min(AIC),
+    delta_AICc  = AICc - min(AICc),
+    delta_BIC   = BIC  - min(BIC),
+    weight_AICc = exp(-0.5 * delta_AICc) / sum(exp(-0.5 * delta_AICc)),
+    weight_BIC  = exp(-0.5 * delta_BIC)  / sum(exp(-0.5 * delta_BIC)),
+    rank_AIC    = rank(AIC),
+    rank_BIC    = rank(BIC)
+  )
+
+ic |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  fit_kable(caption = "AIC, AICc and BIC (lower is better)")
+
+tibble(
+  criterion = c("AIC", "AICc", "BIC"),
+  preferred = c(ic$model[which.min(ic$AIC)], ic$model[which.min(ic$AICc)],
+                ic$model[which.min(ic$BIC)])
+) |>
+  fit_kable(caption = "Model preferred by each criterion")
+```
+
+The information criteria give the comparison a probabilistic form. AIC is minus twice the maximized log-likelihood plus two for each estimated parameter, and BIC replaces the two with the natural logarithm of the sample size, about 4.6 for 96 observations, so BIC penalizes complexity more heavily [@akaike_new_1974; @schwarz_estimating_1978]. The parameter count includes the error variance. AICc adds a small-sample correction that becomes material when the number of parameters is large relative to the sample, as it is for the full model [@hurvich_regression_1989]. Only differences between models matter, and the tables report each model's distance from the best together with the weight that follows from it, a relative probability that the model is the best of those compared [@burnham_multimodel_2004].
+
+All three criteria choose the core model. The market-related model is 1.9 AIC points and 2.5 AICc points behind, a gap that leaves it with some support but clearly second: its AICc weight is 0.22, against 0.77 for the core model. The full model is 6.2 AIC points and 8.7 AICc points behind, with an AICc weight of 0.01, and its BIC distance of 21.6 points leaves it with essentially no weight at all. The BIC weight of the core model is 0.97. The intercept-only and domestic macro models are more than 60 points behind on every criterion and have no support. Differences of this size reflect a consistent pattern: the likelihood gained by adding the S&P 500, the VIX and the four domestic variables to the core model is smaller than the price the criteria charge for the extra parameters.
+
+Our economic reading is the three market prices already summarize what the other variables could add. Global equity returns and volatility, which might be expected to matter for a small open market, do not improve the description of Philippine returns once the exchange rate, the yield and oil are in the model, which is consistent with the view that global risk reaches the local market through the peso and domestic yields.
+
+## Anova F-Test
+```{r anova-f-test}
+# Nested-model F-tests. H0: the extra coefficients in the larger model are all 0.
+# Pairs are (restricted, full) positions in candidate_models.
+
+nested_pairs <- list(c(1, 5), c(2, 5), c(3, 5), c(4, 5), c(2, 4))
+
+map(nested_pairs, function(p) {
+  r <- candidate_models[[p[1]]]
+  f <- candidate_models[[p[2]]]
+  a <- anova(r, f)
+  tibble(
+    restricted     = names(candidate_models)[p[1]],
+    full           = names(candidate_models)[p[2]],
+    extra_terms    = paste(setdiff(names(coef(f)), names(coef(r))), collapse = ", "),
+    q              = abs(a$Df[2]),
+    df_resid       = a$Res.Df[2],
+    RSS_restricted = a$RSS[1],
+    RSS_full       = a$RSS[2],
+    F              = a$F[2],
+    p_value        = fmt_p(a[["Pr(>F)"]][2]),
+    decision       = if_else(a[["Pr(>F)"]][2] < 0.05, "Reject H0 (keep extra terms)",
+                             "Fail to reject H0 (restriction holds)")
+  )
+}) |>
+  bind_rows() |>
+  mutate(across(where(is.numeric), ~ signif(.x, 4))) |>
+  fit_kable(caption = "Nested-model F-tests (alpha = 0.05)")
+```
+
+The nested F-tests give the sharpest answer to whether a block of coefficients is jointly zero, by comparing the residual sums of squares of a restricted and a full model, and the comparisons were chosen to match the economic hypotheses. The test of the intercept-only model against the full model reproduces the overall F-test of the baseline model (F = 12.79, p < 0.0001): the regressors matter together. The remaining tests show which of them are responsible. Moving from the core model to the full model adds six regressors and reduces the residual sum of squares from 0.1536 to 0.1447, a fall of 5.8 percent, which gives F = 0.89 (p = 0.507); the six cannot be distinguished from zero jointly. Adding the four domestic variables to the market-related model leaves the verdict unchanged (F = 0.84, p = 0.503), and so does adding the S&P 500 and the VIX to the core model (F = 0.99, p = 0.375).
+
+The test in the opposite direction is as informative. Adding the five financial variables, the exchange rate, the yield, oil, the S&P 500 and the VIX, to the domestic macro model is overwhelmingly significant (F = 22.59, p < 0.0001). Together the tests say that market prices contain information about the equity market that domestic fundamentals lack, and that domestic fundamentals and global sentiment add nothing once the market prices are present. This is the economic content of the nested comparison: the full model always has the highest fit, so the useful result is which hypotheses the data can reject.
+
+We maintain two cautions. A failure to reject does not prove that the omitted coefficients are zero, as the intervals in the baseline analysis showed: with 96 observations the test has limited power against effects of one or two percentage points. And because the core model was assembled from regressors that were significant in the full model, failing to reject the other six is the expected result of that selection, and selection of this kind distorts p-values [@heinze_variable_2018]. The cross-validation in the model-improvement section therefore carries extra weight.
+
+## Wald Test
+```{r wald-test}
+# Wald tests of the same nested restrictions. Classical Wald uses the usual covariance matrix
+# HC3 and Newey-West give versions robust for heteroskedasticity and autocorrelation. Chi-square and F versions are also reported.
+
+wald_row <- function(r, f, vcov. = NULL) {
+  args_F <- list(r, f, test = "F")
+  args_C <- list(r, f, test = "Chisq")
+  if (!is.null(vcov.)) { args_F$vcov <- vcov.; args_C$vcov <- vcov. }
+  wF <- do.call(waldtest, args_F)
+  wC <- do.call(waldtest, args_C)
+  tibble(F = wF$F[2], p_F = wF[["Pr(>F)"]][2],
+         chisq = wC$Chisq[2], p_chisq = wC[["Pr(>Chisq)"]][2])
+}
+
+map(nested_pairs, function(p) {
+  r <- candidate_models[[p[1]]]
+  f <- candidate_models[[p[2]]]
+  cls   <- wald_row(r, f)
+  rob3  <- wald_row(r, f, hc3)
+  robnw <- wald_row(r, f, nw)
+  tibble(
+    restricted        = names(candidate_models)[p[1]],
+    full              = names(candidate_models)[p[2]],
+    q                 = abs(length(coef(f)) - length(coef(r))),
+    chisq_classical   = cls$chisq, p_chisq_classical = fmt_p(cls$p_chisq),
+    F_classical       = cls$F,     p_F_classical     = fmt_p(cls$p_F),
+    F_hc3             = rob3$F,    p_F_hc3           = fmt_p(rob3$p_F),
+    F_nw              = robnw$F,   p_F_nw            = fmt_p(robnw$p_F)
+  )
+}) |>
+  bind_rows() |>
+  mutate(across(where(is.numeric), ~ signif(.x, 4))) |>
+  fit_kable(caption = "Wald tests of nested restrictions (classical, HC3 and Newey-West)")
+```
+
+The Wald tests repeat the same five comparisons with covariance matrices that relax the classical error assumptions. With the classical covariance matrix the Wald F statistic equals the nested F statistic, and the chi-square version, which rests on large-sample theory, gives almost the same p-value (0.502 against 0.507 for the core model against the full model). The robust versions use the HC3 and Newey-West estimators [@white_heteroskedasticity-consistent_1980; @newey_simple_1987; @long_using_2000], which remain valid under heteroskedasticity and serial correlation. The verdicts do not change. The six extra regressors remain jointly insignificant (HC3: F = 0.41, p = 0.868; Newey-West: F = 0.72, p = 0.632), as do the four domestic variables added to the market-related model (p = 0.794 and 0.505) and the S&P 500 and VIX added to the core model (p = 0.507 and 0.425). The financial variables remain overwhelmingly significant when added to the domestic macro model (HC3: F = 16.32; Newey-West: F = 22.14; both p < 0.0001).
+
+The robust p-values for the extra regressors are, if anything, larger than the classical ones, so the case for the smaller model does not depend on an assumption of constant error variance. This is useful but not conclusive. We show that the diagnostic tests that follow examine whether the error assumptions hold at all, and the sensitivity of the global-factor group to the covariance estimator in the baseline analysis is a reminder that robust and classical answers do not always agree.
+
+## Stepwise Selection
+```{r stepwise-selection, results='asis'}
+# Stepwise selection by AIC (k = 2) and BIC (k = log n). A bidirectional search from the full model where forward and backward searches reach the same models here.
+upper <- formula(model_initial)
+
+step_specs <- tibble(direction = "both", criterion = c("AIC", "BIC"))
+
+step_models <- pmap(step_specs, function(direction, criterion) {
+  step(model_initial,
+       scope = list(lower = ~ 1, upper = upper),
+       direction = direction,
+       k = if (criterion == "AIC") 2 else log(n_obs),
+       trace = 0)
+})
+
+bind_cols(
+  step_specs,
+  map(step_models, function(m) tibble(
+    selected      = paste(setdiff(names(coef(m)), "(Intercept)"), collapse = ", "),
+    n_regressors  = length(coef(m)) - 1,
+    adj_r_squared = summary(m)$adj.r.squared,
+    AIC           = AIC(m),
+    BIC           = BIC(m)
+  )) |> bind_rows()
+) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 4))) |>
+  fit_kable(caption = "Stepwise selection results (bidirectional, starting from the full model)")
+
+# selection path for each criterion
+for (i in seq_len(nrow(step_specs))) {
+  step_models[[i]]$anova |>
+    as_tibble() |>
+    rename(criterion_value = AIC) |>   # holds AIC or BIC depending on k
+    mutate(across(where(is.numeric), ~ signif(.x, 4))) |>
+    fit_kable(caption = paste0("Selection path: both directions, ",
+                                  step_specs$criterion[i])) |>
+    print()
+  cat("\n\n")
+}
+```
+
+Stepwise selection shows whether an algorithm, starting from the full model and removing or re-adding one regressor at a time, arrives at the same place as the economic hypotheses. It does, with one qualification. Under BIC the search removes inflation, the VIX, the policy rate, manufacturing production, the S&P 500 and then M3 growth, and stops at the core model of the exchange rate, the yield and oil (adjusted R-squared 0.531). Under AIC the order of removal is the same until M3 growth, which AIC keeps, so that the selected model is the core three plus M3 growth (adjusted R-squared 0.540). The order of removal is exactly the order of descending p-values in the baseline model (0.848, 0.729, 0.659, 0.461, 0.244, 0.195), so the search adds little to what the individual tests already showed. The criterion values in the selection-path tables are on the scale the search routine uses internally, around -600, and are not comparable with the values in the earlier AIC table; only the differences between steps carry meaning.
+
+The disagreement about M3 growth is a disagreement about the price of a parameter and not about the data. Adding a regressor lowers AIC when its t statistic exceeds about 1.4 in absolute value, lowers BIC when it exceeds about 2.1 at this sample size, and raises adjusted R-squared when it exceeds 1. M3 growth keeps its place under AIC and loses it under BIC, so its t statistic in the four-regressor model lies between the two thresholds, and the AIC-selected model is less than one AIC point better than the core model, a gap too small to separate them. The choice between the criteria is a choice of loss function. An analyst who fears omitting a real exposure, as a risk manager might, tolerates a spurious variable and leans toward AIC; an analyst who wants a short, stable list of indicators to monitor leans toward BIC.
+
+Stepwise search has well-known weaknesses. The p-values and confidence intervals of the selected model are too optimistic because they ignore the search [@heinze_variable_2018], and choosing among many specifications on the same data invites overstating the evidence, a problem that @harvey__2016 document at length for factors in the cross-section of returns. No single criterion is therefore decisive, and the weight of the conclusion rests on their agreement.
+
+The evidence converges. Every measure other than unadjusted R-squared prefers the core model of the exchange rate, the yield and oil, or at most adds one weak variable to it. Market prices carry the explanatory power, domestic fundamentals do not, and global sentiment adds nothing beyond the prices through which it arrives. The baseline specification is therefore the working model for the sections that follow, with three caveats: it was selected on the same data, its fit is an in-sample association and not a forecast, and the error assumptions behind its inference remain untested. The diagnostics test those assumptions next, and the model-improvement section returns to the comparison with cross-validated error, a fairer test of predictive value than any in-sample measure.
+

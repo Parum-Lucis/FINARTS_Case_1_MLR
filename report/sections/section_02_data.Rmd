@@ -1,0 +1,316 @@
+# Section 2: Data
+
+The analysis uses ten series that describe the Philippine equity market and the conditions around it. The dependent variable is the monthly log return of the Philippine Stock Exchange Index (PSEi), and nine regressors represent the factors that prior literature links to equity returns. The unit of observation is the calendar month. The estimation sample runs from January 2018 to December 2025, which gives 96 observations, and December 2017 is collected as well because it is the base month for the first return and the first difference. The series come from three sources: global market indicators from the Federal Reserve Bank of St. Louis (FRED), Philippine macroeconomic indicators and market prices from LSEG Workplace based from the PSA (Philippine Statistics Authority) and Bangko Sentral ng Pilipinas (BSP), and the policy rate decisions of the BSP. We note that their native frequencies differ, from daily prices to monthly year-on-year rates, and they are transformed to a common monthly basis in the next section.
+
+The regressors were chosen because each represents a channel through which equity prices respond to economic conditions. In the discount-rate channel, the BSP policy rate, the 10-year government bond yield and consumer price inflation change the rate at which future cash flows are discounted and the cost of funds for firms. In the global risk channel, the S&P 500, the VIX and WTI crude oil carry international returns, risk appetite and commodity shocks into a small, open market that relies heavily on imported oil. The exchange rate channel operates through the peso value of foreign-currency earnings and the portfolio decisions of foreign investors. The liquidity and real-activity channel is represented by M3 money supply growth and manufacturing production, which describe the funds available for investment and the strength of the domestic economy. These channels organize the discussion in this section: each variable is introduced under its source, with how its data were obtained, what the loading tables show, and why it is relevant to the model. The table below lists every variable with its channel, source and native frequency, in the order in which the sources and variables are discussed in the subsections that follow.
+
+```{r variables-overview}
+# The ten series of the study, in the order they are introduced below (Source I, II, III, then the dependent variable): the channel each one represents, its source and how often it is observed.
+tribble(
+  ~variable,                     ~channel,                      ~source,          ~frequency,
+  "SP500",                       "Global risk",                 "FRED",           "Daily",
+  "WTI",                         "Global risk",                 "FRED",           "Daily",
+  "VIX",                         "Global risk",                 "FRED",           "Daily",
+  "PH_CPI",                      "Discount rate",               "LSEG Workplace", "Monthly, year-on-year",
+  "PH_M3",                       "Liquidity and real activity", "LSEG Workplace", "Monthly, year-on-year",
+  "PH_Manufacturing_Production", "Liquidity and real activity", "LSEG Workplace", "Monthly, year-on-year",
+  "PH_10Y_GS_Yield",             "Discount rate",               "LSEG Workplace", "Daily",
+  "USD_PHP",                     "Exchange rate",               "LSEG Workplace", "Daily",
+  "BSP_RRP_Rate",                "Discount rate",               "BSP",            "On decision dates",
+  "PSEI",                        "Dependent variable",          "LSEG Workplace", "Daily"
+) |>
+  fit_kable(caption = "Variables of the study: channel, source and native frequency",
+            col.names = c("Variable", "Channel", "Source", "Native frequency"),
+            full_width = TRUE)
+```
+
+## Source I: FRED — Global Indicators
+
+The three global series come from the Federal Reserve Bank of St. Louis' FRED database and are downloaded through the `quantmod` package: WTI crude oil (DCOILWTICO, in US dollars per barrel), the S&P 500 index (SP500) and the CBOE Volatility Index (VIXCLS). FRED publishes the series on US business days, so a weekday on which a market was closed or no price was published appears as a missing value.
+
+```{r load fred}
+# FRED series, daily: WTI crude (DCOILWTICO), S&P 500 (SP500) and VIX (VIXCLS). The download is saved once as a snapshot in data/raw (see fred_daily_snapshot_info.txt), so every knit uses the same numbers and works without internet. Set refresh_fred to TRUE to download again and overwrite the snapshot.
+refresh_fred  <- FALSE
+fred_snapshot <- here::here("data", "raw", "fred_daily_snapshot.csv")
+
+if (refresh_fred || !file.exists(fred_snapshot)) {
+  invisible(getSymbols(c("DCOILWTICO", "SP500", "VIXCLS"), src = "FRED", auto.assign = TRUE))
+  fred_new <- merge(DCOILWTICO, SP500, VIXCLS)
+  fred_new <- fred_new[paste0(start_date, "/", end_date)]
+  write.csv(data.frame(date = as.character(index(fred_new)), coredata(fred_new)),
+            fred_snapshot, row.names = FALSE)
+  writeLines(c("FRED daily snapshot used by Case_Study_Report.Rmd",
+               paste("Downloaded:", format(Sys.time(), "%Y-%m-%d %H:%M"),
+                     "via quantmod::getSymbols(src = 'FRED')"),
+               "Series: DCOILWTICO (WTI crude oil, USD per barrel), SP500 (S&P 500 index), VIXCLS (CBOE VIX close)",
+               paste("Window:", start_date, "to", end_date)),
+             sub("\\.csv$", "_info.txt", fred_snapshot))
+}
+
+fred_daily <- read_csv(fred_snapshot, show_col_types = FALSE)
+
+df_us_daily <- tibble(
+  date  = as.Date(fred_daily$date),
+  WTI   = as.numeric(fred_daily$DCOILWTICO),
+  SP500 = as.numeric(fred_daily$SP500),
+  VIX   = as.numeric(fred_daily$VIXCLS)
+)
+```
+
+```{r loaded-fred-summary}
+# Quick look at what each loading cell produced: one summary row per variable (size, date range, missing values, min / mean / max), then the first 5 rows. date_col names the date column.
+describe_loaded <- function(df, date_col) {
+  vars <- setdiff(names(df), date_col)
+  tibble(
+    variable  = vars,
+    rows      = nrow(df),
+    first     = as.character(min(df[[date_col]], na.rm = TRUE)),
+    last      = as.character(max(df[[date_col]], na.rm = TRUE)),
+    n_missing = map_int(vars, \(v) sum(is.na(df[[v]]))),
+    min       = map_dbl(vars, \(v) min(df[[v]], na.rm = TRUE)),
+    mean      = map_dbl(vars, \(v) mean(df[[v]], na.rm = TRUE)),
+    max       = map_dbl(vars, \(v) max(df[[v]], na.rm = TRUE))
+  ) |>
+    mutate(across(where(is.double), ~ signif(.x, 5)))
+}
+
+# The rows shown for a group of loaded series: the series are joined on their date column and only the rows that are among the first 5 rows (as loaded) of at least one series are kept, newest first.
+first5_union <- function(dfs, key) {
+  keep <- unique(do.call(c, lapply(dfs, \(d) head(d[[key]], 5))))
+  reduce(dfs, full_join, by = key) |>
+    filter(.data[[key]] %in% keep) |>
+    arrange(desc(.data[[key]]))
+}
+
+describe_loaded(df_us_daily, "date") |>
+  fit_kable(caption = "FRED (daily): summary", full_width = TRUE)
+
+head(df_us_daily, 5) |>
+  fit_kable(caption = "FRED (daily): first 5 rows", full_width = TRUE)
+```
+
+The summary table shows that each of the three series has 2,109 rows, one for every weekday from 1 December 2017 to 31 December 2025. The missing values (90 for WTI, 78 for the S&P 500 and 51 for the VIX) are not errors: they are weekdays on which a value was not published, mainly public holidays, and the calendars differ slightly between the series, since none of the three is available on 50 dates, while 13 dates have an S&P 500 value but no WTI price. These gaps are filled forward in the next section, so that only information available at the time is used. The minimum, mean and maximum describe the period. The VIX ranged from 9.15 to 82.69, the peak being 16 March 2020, and averaged 19.6, and the S&P 500 ranged from 2,237 to 6,932 with a mean of 4,131. WTI ranged from -36.98 to 123.64 US dollars per barrel, and the negative value is 20 April 2020, when the benchmark price turned negative during the collapse in demand. It is a genuine observation, but the logarithm of a negative price does not exist, so oil returns are computed from month-end prices, which are positive in every month of the sample. The first rows show the layout of the file, oldest date first, beginning on 1 December 2017 with a WTI price of 58.35, an S&P 500 level of 2,642.22 and a VIX of 11.43. Together the three series represent the global risk channel, and the subsections below set out why each is expected to matter for Philippine equity returns.
+
+### Regressor I: S&P500
+
+The S&P 500 represents the global risk channel in its most direct form. Through its composition of 500 leading companies, it reflects the overall health and performance of the U.S. stock market and acts as a proxy for market-wide movements and investor sentiment, which directly influence stock returns. Its returns are often analyzed to assess the impact of economic factors, investor behavior and market dynamics on stock performance [@dilpriya2025]. Equity markets also tend to move together, and the co-movement strengthens in turbulent periods partly because volatility rises [@forbes_no_2002], so a positive relationship between S&P 500 returns and PSEi returns is expected.
+
+The link between the S&P 500 and stock market returns is also grounded in valuation theory. The discounted cash flow (DCF) model and the capital asset pricing model (CAPM) explain how changes in interest rates affect stock prices by changing the present value of expected future earnings. Empirical research on the S&P 500 shows that the effect of interest rates differs between growth and value stocks within the index: nominal returns are positively correlated with interest rate levels and slopes, growth stocks show negative correlations between excess returns and interest rates, and value stocks show positive ones [@sigfrid2024].
+
+The distribution of the index's returns and its realized volatility have also been studied to understand financial stability and market behavior during different periods, such as crises. These analyses reveal that return and volatility patterns within the S&P 500 provide insights into market risk and return dynamics, which are essential for predicting near-future market behavior [@akter2018].
+
+Investor sentiment is a further link between the S&P 500 and stock returns. Studies indicate that firm-specific sentiment influences short-run stock returns within the index, with a noted negative relationship between overall sentiment and market performance, which highlights the behavioral aspects affecting returns [@youssef2023]. The S&P 500 is therefore included as the benchmark for global equity conditions.
+
+### Regressor II: WTI
+
+WTI crude oil enters the global risk channel through the commodity market. West Texas Intermediate (WTI) crude oil returns may influence PSEi monthly log returns through production costs, inflation rates, consumer spending and demand, and purchasing power. As the Philippines relies heavily on imported petroleum, rising global oil prices could raise transportation and operating costs and reduce companies' profitability and stock valuations. WTI returns are thus expected to be negatively associated with Philippine stock market returns.
+
+@sadeghi2022 investigated the impact of oil price shocks on the stock market in oil-importing as well as oil-exporting countries and found that the reactions of the markets are contingent on the source of oil shocks and on the economic situation at the time. Likewise, @ziadat2022 reported that stock markets in oil-importing economies did not exhibit consistent responses to oil shocks, suggesting that the effects may vary across economic conditions.
+
+In addition, according to @escribano2023, the linkages between crude oil and stock markets tend to intensify in times of economic stress, and shocks are often transmitted from oil to the equity market. @castro2024 also confirmed that stock market reactions vary depending on whether the shifts in oil prices are due to supply disturbances, aggregate demand or inventory shocks, so increases in oil prices do not always lead to a decline. The distinction between demand-driven and supply-driven oil price changes is also central to @kilian_impact_2009, who show that the response of U.S. real stock returns to an oil price shock depends on the underlying source of the shock.
+
+Furthermore, @hanif2024 document that oil demand shocks are significant in explaining the fluctuations in stock returns in key oil exporting and importing countries. These findings support including WTI returns in the regression as a potential independent variable in explaining stock market behavior.
+
+For the Philippines, the 96 monthly observations from 2018 to 2025 suffice for the initial regression estimates, but the COVID-19 pandemic, including the episode in April 2020 in which the WTI price turned negative, and the later rise in energy prices could make the relationship unstable. Although a negative relationship is the theoretical expectation for an oil-importing economy, its sign and significance are therefore left to be estimated empirically.
+
+### Regressor III: VIX
+
+The CBOE Volatility Index (VIX) completes the global risk channel by capturing the price of uncertainty rather than the level of returns. It is computed from S&P 500 options and measures expected volatility in the US stock market; it reflects both the expected variability of returns and investors' risk aversion [@bekaert_vix_2014], which is why it is commonly considered an indicator of investor fear. An increase in the VIX generally reflects greater uncertainty, which may encourage investors to reduce their exposure to riskier assets, including emerging-market equities, and may therefore influence PSEi monthly log returns through investor sentiment, market uncertainty and international capital flows. Consequently, the VIX is expected to have a negative relationship with Philippine stock market returns.
+
+@valadkhani2024 examined how changes in the VIX and US dollar index affect emerging stock markets. They found that higher VIX levels significantly reduced emerging-market returns, while decreases in the VIX produced smaller positive effects. Similarly, Kirci @kirci2024 investigated the relationship between the VIX and global stock markets, finding that higher VIX levels were associated with lower stock returns, particularly during extreme market conditions. These findings suggest that global uncertainty may negatively influence local equity markets.
+
+In India, @narang2023 found that investor fear, measured through the VIX, played a significant role in stock market declines and subsequent recovery during the COVID-19 pandemic. @sharma2022 also observed that rising VIX levels were associated with declining stock returns in several BRIC economies during the pandemic, although these effects weakened over time.
+
+The relationship is, however, not consistently strong across markets. @jurkowska2024 examined VIX spillovers across the Fragile Five emerging economies and found relatively weak connections between the VIX and sectoral stock indices, which suggests that global market uncertainty may not always significantly explain local stock market movements. The VIX is therefore included with a negative expected sign, and the strength of the relationship is left to the data.
+
+## Source II: PSA via LSEG Workplace — Local Macroeconomics
+
+The three domestic macroeconomic series are economic-indicator series exported from LSEG Workplace as one Excel file each: consumer price inflation (series aPHCPIAR), M3 money supply growth (aPHCMS3YB/A), and manufacturing production growth (aPHCINDYG/CA). LSEG compiles these indicators from national sources, and all three are published monthly as year-on-year percentage changes, which is the form used in the model. The loading function skips the header rows of each file, keeps the date and the value, sets the date to the first day of its month so that the series can be joined by month later, and drops any row without a value.
+
+```{r load lseg-ph-macroecon}
+read_ph_macro <- function(filepath, var_name) {
+  read_excel(filepath, skip = 1, col_names = c("date", var_name)) |>
+    mutate(
+      # Truncate to first of the month for easier/cleaner relational joins
+      year_month = floor_date(as.Date(date), "month"),
+      across(all_of(var_name), as.numeric)
+    ) |>
+    filter(!is.na(year_month), if_all(all_of(var_name), \(x) !is.na(x))) |>
+    select(year_month, all_of(var_name))
+}
+
+cpi_monthly  <- read_ph_macro(here::here("data", "raw", "PH_CPI_YY_1626.xlsx"), "PH_CPI")
+m3_monthly   <- read_ph_macro(here::here("data", "raw", "PH_M3_YY_1626.xlsx"), "PH_M3")
+mfg_monthly  <- read_ph_macro(here::here("data", "raw", "PH_Manufacturing_Production_YY_1626.xlsx"), "PH_Manufacturing_Production")
+```
+
+```{r loaded-macro-summary}
+bind_rows(
+  describe_loaded(cpi_monthly, "year_month"),
+  describe_loaded(m3_monthly,  "year_month"),
+  describe_loaded(mfg_monthly, "year_month")
+) |>
+  fit_kable(caption = "Loaded data, LSEG macroeconomics (monthly, year-on-year %): summary", full_width = TRUE)
+
+first5_union(list(cpi_monthly, m3_monthly, mfg_monthly), "year_month") |>
+  fit_kable(caption = "LSEG Local macroeconomics: first 5 rows of each series",
+            full_width = TRUE, header_width = 30)
+```
+
+Each of the three series has 121 monthly observations, from August or September 2016 to August or September 2026, and none is missing. The files extend beyond the study window on both sides because we downloaded them with a margin: of the 121 months, 97 (December 2017 to December 2025) are used, and the rest is dropped when the series are joined to the monthly calendar in the next section. The extremes in the summary table all fall inside the study window, so they describe the sample as well as the file. Consumer price inflation ranged from 0.80% to 8.70% with a mean of 3.91%, M3 growth from -8.54% to 22.56% with a mean of 6.66%, and manufacturing production growth from -80.99% to 497.61% with a mean of 16.79%. The range of manufacturing production is by far the widest, and it comes from the pandemic years (the lowest value is in 2020 and the highest in 2021), which is consistent with a collapse in output followed by a rebound measured against a low base. These are values reported by the source, not entry errors, and they are examined with the other regressors in the descriptive analysis. The first rows show that the files list the newest month first (September 2026 for consumer prices, August 2026 for M3 and manufacturing production). The three series are already year-on-year rates, so they need no further transformation, and their means differ slightly from the sample means reported later because the file means include the months outside the window. They represent the liquidity and real-activity channel (M3 and manufacturing production) and the inflation side of the discount-rate channel (consumer prices), whose relevance is discussed below.
+
+### Regressor IV: Consumer Prices
+
+Consumer price inflation is the first variable of the discount-rate channel. The consumer price index (CPI) measures the rate at which the general price level of the goods and services purchased by consumers changes, and its year-on-year change is used here as the inflation rate. The link between inflation and stock returns can be explained through its impact on corporate earnings, interest rates and investor demand, although the evidence is often contradictory. As inflation rises, costs such as raw materials, labor and transport can increase, and if companies are unable to pass these costs on to consumers, corporate profits could fall and future cash flows become less predictable.
+
+The relationship between inflation and corporate valuations can therefore be explained as follows: the higher the expected inflation, the lower the expected long-run real earnings growth and the higher the real return required by investors, which implies a negative relationship between inflation and stock returns. @fama_stock_1981 showed that this negative relationship in the data can be traced to the link between inflation and real activity, a point taken up again below with the activity variables.
+
+However, inflation can also have a positive relationship with stock returns, depending on its type. @cieslak2023 show that inflation can be caused by demand-driven factors and by cost-driven factors. Demand-driven inflation can result in economic expansion, so corporate earnings increase and returns are affected positively, whereas cost-driven inflation reduces corporate profits and economic activity. Inflation also depends on monetary policy: @zhang2021 found that the relationship between stock returns and inflation can be partly attributed to monetary policy, and that the more counter-cyclical monetary policy is, the more negative the relationship between share price returns and inflation becomes.
+
+In emerging markets a link between inflation and share prices is also visible. @folorunso2023 shows that inflation had a negative and significant impact on Nigerian share prices, although research on emerging Asian markets shows that some defensive industries can act as a hedge against inflation [@isnandari2017]. CPI inflation should therefore be considered as a theoretical determinant of PSEi monthly log returns, as it can have an impact on corporate profits, discount factors, investors' purchasing power and monetary policy.
+
+### Regressor V: M3 Money Supply
+
+M3 money supply growth belongs to the liquidity and real-activity channel. The money supply indicates how much money is circulating within the economy, so its growth rate shows whether domestic liquidity is expanding or tightening, and when liquidity increases, investors may have more money to invest in financial assets. Portfolio balance theory describes how investors change the allocation of their assets depending on the liquidity in the economy, so that monetary policy affects asset prices through liquidity and risk premia [@drechsler2018].
+
+@bhattacharjee2021 observed a long-run connection between the money supply and the stock market index and stated that the connection is positive. They also showed that an increase in the money supply can lead to an immediate positive impact on stock prices, although there was no evidence of a short-term causal effect, which means that the effect of the money supply can be more apparent in the long run. In addition, @nguyen2022 found that increasing liquidity leads to positive returns in the stock market across 34 emerging economies, and that this relationship is stronger in countries with higher quality institutions. This implies that more money in the economy can support the stock market, but that the effect depends on the financial situation of the country.
+
+Not all studies find a positive relationship, and the evidence differs by market. @mallik2024 found an inverse relationship between money supply and stock prices in Bangladesh in the short term, whereas @schrank2024 found a positive relationship between money supply and stock prices in Thailand. Different market conditions may therefore lead to different effects.
+
+The impact of M3 growth on monthly log returns of the PSEi can thus be explained by the availability of funds to invest and the conditions of the market, but the studies show that it does not have a consistent relationship with stock returns. Increasing liquidity can lead to more investment and higher stock prices, but if the extra money does not translate into demand for stocks, the relationship can be weaker or even negative. M3 growth is therefore included in the regression as an important variable.
+
+### Regressor VI: Manufacturing Production
+
+Manufacturing production completes the liquidity and real-activity channel as an indicator of economic activity. An increase in manufacturing can raise sales and profits for businesses, which can raise investor confidence and lift the stock market, and @fama_stock_1981 found that stock returns are positively related to measures of real activity such as industrial production. However, manufacturing growth is not always reflected in high stock returns, because expectations, interest rates, inflation and other economic factors also affect stock prices.
+
+@endres2020 used a long-run ARDL model to study the impact of industrial production and a number of other macroeconomic variables on the PSEi, with data between January 2009 and December 2019, and the results suggest a negative relationship between manufacturing growth and the PSEi stock return in the long run, so that increasing manufacturing does not by itself improve stock returns. This shows how the relationship between macroeconomic factors and stock returns may change over time.
+
+Another study, by @camino2023, investigated the relationship between stock indices and economic growth within the ASEAN-4 nations and revealed that GDP growth was not statistically significant in explaining the variations in the stock indices of those countries. Although they focused on economic growth, they suggest that an improvement in the real economy may not have a significant effect on the stock market.
+
+While there may be many complexities to the relationship between manufacturing growth and stock market returns, in general, higher growth levels can point to increased levels of economic activity. This will largely depend on investors’ perception of how sustainable the growth is and if it will translate into increased company profits. As there are many studies surrounding manufacturing, and overall economic growth in the Philippines, further analysis on the sector may provide the most insightful information on whether this growth factor can be related to monthly log returns on the PSEi.
+
+## Source III: BSP via LSEG Workplace or Direct — Local Financial Environment
+
+The PSEi (series .PSI), the USD/PHP spot rate (PHP=) and the 10-year government bond yield (PHBD2509=RRPS) are daily price-history exports from LSEG Workplace, one Excel file each. In each file a block of statistics precedes the daily history, so the loading code starts reading at the row where the history begins (row 33 for the PSEi, row 29 for USD/PHP and row 19 for the bond), converts the Excel serial dates to dates, and keeps the closing value of the PSEi, the mid price of USD/PHP and the yield to maturity of the bond.
+
+The BSP policy rate is different, because it is a decision rather than a market price. It was built from the text of the announcements of the BSP Monetary Board, which state each decision and the resulting rate (64 announcements from 14 December 2017 to 11 December 2025, kept in the data folder as a text table). The date and the rate were extracted from the announcement texts into a two-column table with the help of an AI assistant (Claude Sonnet 5.5).
+
+```{r load lseg-ph-finmkt}
+# convert excel date to real date
+excel_date <- function(x) as.Date(as.numeric(x), origin = "1899-12-30")
+
+# 10y bond yield data starts at 19th row, 12/17-12/25
+ph_10y_raw <- read_excel(here::here("data", "raw", "PH_10Y_GS_YIELD_1725.xlsx"), skip = 18)
+ph_10y_daily <- ph_10y_raw |>
+  select(date = Date, PH_10Y_GS_Yield = `Yield to Maturity`) |>
+  mutate(
+    date = excel_date(date),
+    PH_10Y_GS_Yield = as.numeric(PH_10Y_GS_Yield)
+  ) |>
+  filter(!is.na(date) & between(date, start_date, end_date))
+
+# PSEI data starts at 33rd row, 12/17-12/25
+psei_raw <- read_excel(here::here("data", "raw", "PSEI_1725.xlsx"), skip = 32)
+psei_daily <- psei_raw |>
+  select(date = `Exchange Date`, PSEI = Close) |>
+  mutate(
+    date = excel_date(date),
+    PSEI =as.numeric(PSEI)
+  ) |>
+  filter(!is.na(date) & between(date, start_date, end_date))
+
+# USD/PHP starts at 29th row, 12/17-12/25
+usdphp_raw <- read_excel(here::here("data", "raw", "USDPHP_1725.xlsx"), skip = 28)
+usdphp_daily <- usdphp_raw |>
+  select(date = `Exchange Date`, USD_PHP = `Mid Price`) |>
+  mutate(
+    date = excel_date(date),
+    USD_PHP =as.numeric(USD_PHP)
+  ) |>
+  filter(!is.na(date) & between(date, start_date, end_date))
+
+# Parsed RRP starts at 3rd row. Parsing c/o from RRP text using Claude Sonnet 5.5
+rrp_raw <- read_excel(here::here("data", "raw", "PH_RRP_1725.xlsx"), skip = 2,                       col_names = c("date", "BSP_RRP_Rate"))
+
+rrp_1725 <- rrp_raw |>
+  mutate(
+    date = as.Date(date),
+    BSP_RRP_Rate = as.numeric(BSP_RRP_Rate)
+  ) |>
+  filter(!is.na(date) & date <= end_date) |>
+  arrange(date)
+```
+
+```{r loaded-finmkt-summary}
+bind_rows(
+  describe_loaded(ph_10y_daily, "date"),
+  describe_loaded(psei_daily,   "date"),
+  describe_loaded(usdphp_daily, "date"),
+  describe_loaded(rrp_1725,     "date")
+) |>
+  fit_kable(caption = "Loaded data, LSEG financial markets + BSP: summary", full_width = TRUE)
+
+first5_union(list(ph_10y_daily, psei_daily, usdphp_daily, rrp_1725), "date") |>
+  fit_kable(caption = "Local Financial Environment: first 5 rows of each series",
+            full_width = TRUE, header_width = 30)
+```
+
+```{r rrp-parse-check}
+# Each Monetary Board announcement states the rate in words ("... to 4.50 percent"). The parsed table is compared with the first percentage stated in each announcement text (skipped if the text file is absent).
+
+rrp_text_file <- here::here("data", "raw", "PH RRP TEXT.xlsx")
+rrp_matches   <- NA_integer_
+if (file.exists(rrp_text_file)) {
+  rrp_text <- read_excel(rrp_text_file, skip = 2, col_names = c("date", "description"),
+                         col_types = "text") |>
+    mutate(date         = as.Date(date),
+           rate_in_text = as.numeric(str_match(description, "([0-9.]+) percent")[, 2]))
+  rrp_matches <- rrp_1725 |>
+    inner_join(rrp_text, by = "date") |>
+    summarise(n = sum(abs(BSP_RRP_Rate - rate_in_text) < 1e-9, na.rm = TRUE)) |>
+    pull(n)
+}
+```
+
+The summary table shows how the four series are built. The bond yield and the USD/PHP rate have a row for every weekday between 1 December 2017 and 31 December 2025 (2,109 rows) and no missing values, while the PSEi has 1,975 rows, one for each day the exchange traded, which is 134 fewer, and its last row is 29 December 2025. The yield ranged from 3.56% to 8.63% with a mean of 5.87%, and the peso traded between 47.65 and 59.26 to the US dollar with a mean of 53.50. The policy rate table is not a daily series: it has one row for each of the 64 Monetary Board decisions, with rates between 2.00% and 6.50%, and the rate changed at 31 of the decisions and was kept unchanged at the others.`r if (!is.na(rrp_matches)) paste0(" The extracted rates were compared with the percentage stated in each announcement text, and ", rrp_matches, " of the ", nrow(rrp_1725), " agree.")` In the table of first rows, NA marks a date on which a series has no value. This comes from joining series with different calendars (the PSEi is not observed on Philippine holidays, and the policy rate only on decision dates) and is not missing data. The files list the newest date first, while the policy rate table is ordered from the oldest decision. The four series are the dependent variable (the PSEi), the exchange rate (USD/PHP) and the discount-rate channel (the bond yield and the policy rate), and the subsections below explain why each is relevant.
+
+### Regressor VII: 10-year Government Bond Yield
+
+The 10-year government bond yield is the second discount-rate variable. It reflects the returns demanded by investors on long-term government securities, acts as a benchmark in the country, and can also be viewed as a forecast of interest rates, inflation and economic growth. Changes in the Philippine 10-year yield might influence the PSEi monthly log returns through borrowing costs, investments and stock valuation: a rise in the yield increases the discount rate used for stock valuation and is expected to influence stock market returns negatively.
+
+@zaremba2023 examined how interest rates move, change, and whether they have any relation with market performance across 60 countries. The authors found that countries experiencing larger increases in government bond yields tended to have lower subsequent equity returns than those experiencing smaller increases. @prabheesh2024 investigated financial markets in eight emerging economies during the COVID-19 pandemic. The authors observed that asset purchase announcements generally coincided with rising stock returns and declining bond yields. Together, the results suggest that movements in government bond yields may contribute significantly to explaining equity market performance.
+
+However, empirical evidence shows the relationship isn't consistently negative. @mcmillan2022 identified that the relationship between bond yields and stock returns is different and changes over time, with predominantly negative correlations becoming positive under certain economic conditions. @molenaar2024 identified inflation, real interest rates, and government creditworthiness as the key determinants of the stock-bond correlations. Additionally, @schrank2024 found that increases in monetary policy interest rates in Thailand were associated with higher stock returns and government bond yields, particularly during periods of political or economical crisis in the country.
+
+For the Philippines, these findings justify testing whether changes in the 10-year government bond yield are related to PSEi monthly log returns; because the yield is a level, it enters the model as its monthly change. The 96 monthly observations from 2018 to 2025 are sufficient for the regression analysis, although the stability of the association may be affected by economic uncertainty and shocks, such as the COVID-19 pandemic and inflation. Although a negative relationship is theoretically expected, its direction and significance are therefore established through empirical testing.
+
+### Regressor VIII: Dollar Value against Local Currency
+
+The USD/PHP exchange rate is the exchange rate channel of the model. It is quoted in pesos per US dollar, so an increase means a depreciation of the peso. Exchange rate fluctuations influence stock market returns by affecting firm valuations, particularly those of firms with foreign currency exposure, and by shaping investor expectations; currency movements reach firm valuations through earnings expectations [@bartov_firm_1994]. The theoretical relationship can be explained through the International Fisher Effect, interest rate parity, and portfolio theory, which describe how exchange rates, interest rate differentials, and international investment decisions interact [@umoru2024]. Studies on emerging markets suggest that exchange rate movements can significantly affect stock returns through macroeconomic factors such as inflation and interest rates, and that these effects may be nonlinear, varying according to prevailing economic conditions [@bonga2026].
+
+Empirical evidence generally suggests that currency appreciation can positively influence stock market performance, while depreciation may negatively affect returns, particularly when accompanied by high inflation or economic instability [@eldiftar2023; @bonga2026]. However, @umoru2024 found that exchange rate changes had positive effects on stock returns at several quantiles, while their overall Bayesian Vector Autoregression (BVAR) results indicated relatively weak direct effects. Interest rate changes, meanwhile, had a more significant influence over the long term. The relationship can also operate in the opposite direction, with stock market returns predicting exchange rate movements [@abdallah2026].
+
+Exchange rate volatility may further influence stock return volatility, although its effects vary across countries and currency pairs [@karunanayake2014; @sreenu2023]. Additionally, cointegration findings in emerging markets suggest possible long-run equilibrium relationships between exchange rates and stock returns [@eldiftar2023]. These findings provide a basis for examining whether USD/PHP exchange rate changes influence Philippine stock market returns, considering the country's emerging market status. A negative sign is expected, because a depreciation of the peso tends to weigh on returns, but the strength and direction of this relationship must be established through empirical analysis.
+
+### Regressor IX: Target Reverse Repurchase Rate
+
+The Bangko Sentral ng Pilipinas (BSP) Reverse Repurchase Rate (RRP) is the policy variable of the discount-rate channel. Central bank policy rates such as the BSP RRP influence liquidity conditions and the cost of borrowing in the economy, which in turn affect investor behavior and asset prices, including stock market returns. A reduction in the policy rate typically signals an easing monetary stance, which can lower financing costs and potentially stimulate investment and consumption, thereby supporting stock market performance. Conversely, a rate increase signals tightening, raises borrowing costs, and can weigh on valuations and investor sentiment. In the United States, unexpected cuts in the policy rate have been found to raise stock prices, mainly by lowering expected excess returns [@bernanke_what_2005].
+
+Within the sample the BSP policy rate moved in both directions: it was raised from 3.00 percent in December 2017 to 4.75 percent by the end of 2018, lowered to 2.00 percent by November 2020, raised to a peak of 6.50 percent in October 2023 and lowered to 4.50 percent by December 2025. The rate stood at 5.75 percent in early 2025 and was lowered to 5 percent by August 2025 as part of an easing cycle that continued beyond the sample, to 4.25 percent in February 2026. Beginning in April 2026, the BSP reversed course and raised the rate to 4.50 percent, then 4.75 percent in June and 5 percent by August 2026, citing inflationary pressures linked to the Middle East conflict [@statista2026]. Because the series contains easing phases and a tightening phases, the effect of RRP changes on stock returns may differ by direction, and we examine it empirically.
+
+From a theoretical perspective, studies on stock market returns and their correlations with macroeconomic variables and financial market indicators suggest that monetary policy changes impact stock market volatility and returns. For example, research on the US markets shows that structural changes in policy and economic shocks, such as those from quantitative easing, affect return and volatility spillovers between markets, including stocks [@su2022]. This implies that changes in central bank rates like the BSP RRP can alter the risk-return dynamics in the stock market.
+
+Moreover, the relationship between stock market returns and interest rates is often mediated by investor expectations and market sentiment. The study on US stock market returns highlights that economic cycles and investor sentiment influence the predictive power of financial indicators, including correlations among industry portfolios, which can be affected by monetary policy shifts [@li2020]. Thus, changes in the BSP RRP may influence stock market returns through their impact on investor expectations and market co-movements. The expected sign is negative, but it may differ between rate increases and rate cuts.
+
+### Dependent Variable: PSEI
+
+The dependent variable of the study is the monthly log return of the Philippine Stock Exchange Index (PSEi). The PSEi is the benchmark index of the Philippine Stock Exchange (PSE), representing the performance of 30 selected publicly listed companies based on criteria such as market capitalization, liquidity, and free-float requirements [@pse]. As a primary indicator of the Philippine equity market, it provides an overview of stock market performance and reflects changes in investor confidence and market conditions of the country as-a-whole. Its movements are particularly important to investors and financial analysts because they offer insights into the performance of publicly traded companies and the broader investment environment in the Philippines.
+
+Historically, the PSEi has experienced significant fluctuations in response to various domestic and international developments. In January 2018, the index reached a record high of over 9,000 points before experiencing a notable decline amid concerns involving inflation, currency depreciation, global trade tensions, and monetary tightening [@fitch2019]. Similarly, the COVID-19 pandemic in 2020 and subsequent global economic uncertainties contributed to further fluctuations in the Philippine stock market. These developments illustrate how the PSEi responds to changing economic and financial conditions, making it relevant to examine the factors associated with its movements [@fitch2022]. 
+
+The performance of the PSEi may be associated with several macroeconomic and financial indicators, including gross domestic product (GDP), inflation rates, interest rates, exchange rates, and international stock market performance [@gallardo2025]. These variables may influence the Philippine equity market through different channels, such as changes in corporate profitability, borrowing costs, purchasing power, foreign investment flows, and investor sentiment. Since these factors can operate simultaneously, examining their individual relationships with the PSEi can provide a more comprehensive understanding of the forces associated with Philippine stock market performance. 
+
+Given these relationships, multiple linear regression is an appropriate statistical method for examining how several explanatory variables are simultaneously associated with the PSEi. It allows researchers to estimate the direction and magnitude of each explanatory variable's relationship with the index while holding other variables constant [@yan2009]. Furthermore, the method provides a basis for testing the statistical significance of individual variables and assessing their combined explanatory power. Through this approach, the researchers can identify which economic and financial indicators have stronger statistical relationships with the Philippine stock market. 
+
+Moreover, since the PSEi is observed over time, applying regression analysis to financial time-series data requires evaluating whether the estimated relationships satisfy the relevant statistical assumptions. Diagnostic procedures can help identify potential issues such as multicollinearity, heteroskedasticity, autocorrelation, and influential observations [@krispin2019]. Addressing these concerns through appropriate model improvements can strengthen the reliability of the regression results and the conclusions drawn from them. Before the regression can be estimated, the daily and monthly series described above are combined into a single monthly dataset, which is the subject of the next section.
+

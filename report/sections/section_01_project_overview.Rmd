@@ -1,0 +1,36 @@
+# Section 1: Project Overview
+
+## Introduction
+
+Equity returns are among the most closely watched outcomes in finance, and among the hardest to explain. Stock share prices may respond to news about interest rates, inflation, currencies, liquidity, global risk appetite and real economic activity, and the weight of each influence shifts with the economic setting and with the level of market uncertainty. Our domain of interest here is that relationship in a small, open emerging market. The Philippine Stock Exchange Index (PSEi) is the local exchange's main index, a free-float-adjusted index of the 30 largest and most actively traded common stocks listed there [@pse], so its monthly return summaries how the market as a whole values Philippine listed companies. @chen_economic_1986 showed that macroeconomic innovations, among them industrial production, inflation and the term structure of interest rates, are priced in stock returns, and @wongbangpo_stock_2002 examined the interdependence between stock markets and macroeconomic fundamentals in the ASEAN-5 countries, the Philippines among them.
+
+This study examines the macro-financial determinants of the monthly log returns of the PSEi from January 2018 to December 2025, which gives 96 monthly observations. Nine explanatory variables are used: S&P 500 returns, USD/PHP exchange rate movements, changes in the Bangko Sentral ng Pilipinas (BSP) reverse repurchase rate, changes in Philippine 10-year government bond yields, Philippine consumer price inflation, M3 money supply growth, manufacturing production growth, West Texas Intermediate (WTI) crude oil returns and the CBOE Volatility Index (VIX). They follow four channels developed in Section 2: the discount-rate channel (the policy rate, the 10-year yield and inflation), the global risk channel (the S&P 500, the VIX and WTI crude oil), the exchange rate channel (USD/PHP) and the liquidity and real-activity channel (M3 and manufacturing production). The window suits the domain because conditions varied widely across it. The policy rate ranged from 2.00% to 6.50%, the 10-year yield from 3.7% to 8.3% and year-on-year inflation from 0.8% to 8.7%, and the COVID-19 shock produced the worst month of the sample, a log return of -0.24 in March 2020, in line with the unprecedented stock market reaction documented by @baker_unprecedented_2020.
+
+Such variation gives the regressions something to explain, but it also lets a few extreme months dominate the estimates, so our analysis does not stop at estimation. Multiple linear regression measures how each variable is associated with PSEi returns in direction, magnitude and statistical significance while the others are held constant aligned with the principle of ceteris paribus. Statistical inference, model evaluation, regression diagnostics and model improvement then test whether those associations can be trusted, and logistic regression extends the analysis from the size of a return to the probability of a rising or sharply falling month.
+
+Knowing which conditions move the stock market, in which direction and by how much is essential to sound financial decisions. We report in the scope of investment and portfolio analysis with exposure to Philippine equities, for example a fund management benchmarked to the PSEi. Each month must be judged whether conditions justify holding, adding to, hedging or trimming that exposure, and which published indicators deserve attention. Two practical questions follow. The first concerns monitoring: which conditions have moved the market reliably enough to be watched, and how much return is associated with a given change in each of them? The second concerns risk: because large losses are costly and slow to recover, the investor also needs to know whether the same conditions help identify the months in which sharp declines occur, defined here as a monthly log return below -5%.
+
+Likewise, financial institutions that set risk limits and policymakers who track financial conditions face versions of the same problem and can read the results as evidence on how global and domestic developments reach the market. We stress that the report evaluates contemporaneous associations, not forecasts. Monthly equity returns are notoriously hard to predict out of sample [@welch_comprehensive_2008], so the evidence supports decisions about what to monitor and how much risk to carry, and not about market timing. Our decision context therefore reduces to one empirical question.
+
+## Research Question
+
+> Which global and domestic macro-financial conditions, individually and as groups, show a statistically and economically meaningful association with the monthly log return of the PSEi between January 2018 and December 2025, and with the probability of a sharp monthly decline, after the regression assumptions are tested and corrected, and what follows from the resulting evidence for how an investor with Philippine equity exposure should monitor and manage the exposure?
+
+We break our core research question down into four sub-questions:
+
+1. **Overall fit.** To what extent are the nine conditions jointly related to monthly PSEi returns (overall F-test), and what share of the month-to-month variation is explained?
+2. **Individual effects.** Which conditions have a non-zero association once the others are held constant (t-tests), and how large and how precisely estimated is each (confidence intervals), judged against the smallest effect that matters?
+3. **Groups of conditions.** Which of the global factors, domestic macro conditions, and monetary and exchange rate conditions are jointly significant (joint F-tests), and how far is the relationship concentrated in a few individual variables?
+4. **Robustness and tails.** How much of the association survives heteroskedasticity-robust inference and a March 2020 adjustment, and how far is it carried over to the probability of a sharp monthly decline (logistic regression)?
+
+## Objectives
+
+With 96 observations, nine regressors and an extreme month in the sample, valid inference cannot be assumed, so our objectives are organised around the threats to it:
+
+- Small sample and many regressors: separate individual from joint evidence, and guard against over-fitting by comparing specifications on parsimony and cross-validated error rather than in-sample fit.
+- Heteroskedasticity, serial dependence and non-normality: assess each directly, and base inference on covariance estimators that remain valid when the classical error assumptions fail.
+- Influential observations: establish whether any conclusion depends on a single month by re-estimating with outlier-resistant estimators and with the extreme month modelled explicitly.
+- Rare large losses: model sharp declines with a penalised-likelihood binary regression, because the events are too few for conventional maximum likelihood, and validate it out of sample and out of time.
+
+Our report follows the order of our analysis. Sections 2 to 4 describe, prepare and explore the data, Section 5 estimates the baseline multiple regression, Sections 6 and 7 evaluate and diagnose it, Section 8 improves it, Section 9 applies logistic regression, and Sections 10 and 11 interpret the findings and give the financial recommendation.
+

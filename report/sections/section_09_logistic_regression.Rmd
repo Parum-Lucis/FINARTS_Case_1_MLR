@@ -1,0 +1,584 @@
+# Section 9: Logistic Regression
+
+Sections 5 to 8 model how large the monthly PSEi return is. The linear model explains the conditional mean and, once March 2020 is handled, finds that the peso and the 10-year yield carry most of the explanatory power. We further show that an investor also needs to know how likely a month is to be an up month and how likely it is to be a crash, and the mean of a return distribution says little about its tail. The PSEi return is left-skewed (skewness -0.94, Section 4), so the factors that move a typical month need not be the ones that separate a crash from the rest. This section answers that question with logistic regression, which models the log-odds of a yes/no outcome and is the advanced regression method of the report. Model A takes the value 1 when the PSEi return is positive (48 of the 96 months) and Model B when it falls below -5% (21 months, 22%), a threshold whose sensitivity is tested below. Both use the same 96 months and the same nine regressors as the linear model, so any difference in results comes from the question asked and not from the data.
+
+The logit is the right tool for three reasons. First, the outcomes are binary, and a linear model of a 0/1 variable can predict probabilities outside the range of 0 to 1 and has unequal error variance by construction, whereas the logit keeps probabilities inside the range and states each effect as a multiplier of the odds, which is how risk is usually discussed. Second, the question is a financial one: binary crash models with macroeconomic and financial regressors are standard in the literature on currency crashes and early-warning systems for emerging markets [@frankel_currency_1996; @bussiere_towards_2006]. Third, the data support it, because both outcomes are defined from series already in the dataset and 21 crash months are enough for a core model of three regressors (7 events per regressor) if the estimator is chosen with care. That care is the Firth penalized likelihood [@firth_bias_1993; @heinze_solution_2002] for Model B. With 2.3 events per regressor in the full model, far below the rule of 10 [@peduzzi_simulation_1996], ordinary maximum likelihood is biased, and the penalty removes the bias and keeps the estimates finite even if the outcome were perfectly separated. Model A, with 48 events, needs only the standard logit. Turning a return into a yes/no outcome discards the size of the move, which is the price of asking the question, and the linear model of the earlier sections, which keeps that information, should be read alongside it.
+
+The other advanced methods were considered and are not needed, because the data do not show the problem that each one solves. Regularization, whether ridge [@hoerl_ridge_1970] or the lasso [@tibshirani_regression_1996], helps when regressors are collinear or too many for the sample. Here the largest variance inflation factor is 2.16 and the condition number 2.9 (Section 7), nine regressors leave 86 residual degrees of freedom, and the nested tests of Sections 6 and 8 already show that the six weakest regressors can be dropped together (F-test p = 0.44), so selection is handled without a penalty parameter that 96 months could not estimate reliably. Nonlinear functional forms were the concern raised by the RESET test (p = 0.020), but the rejection disappeared once a March 2020 dummy was added (p = 0.573), which points to one month and not to curvature, and the regressors are already log returns and changes. Interaction effects have no anchor in the channels of Section 2, and with 96 months any interaction would rest on a handful of observations. The only categorical variable the data call for is the March 2020 event dummy, used in Section 8, where robust estimation was also applied (HC3 standard errors, Huber and MM regression). Panel methods need several cross-sectional units, while this study follows one market. We stress that forcing any of these into the analysis would add parameters without answering a question that the data raise.
+
+As in the linear model, the analysis is explanatory: the regressors are contemporaneous and the models describe what moves with the market in the same month, not what will move it next month. The subsections below estimate and interpret Model A and Model B, check their diagnostics, the choice of threshold and the influence of March 2020, test the fit on months the models did not see, and compare the two models with each other and with the linear model.
+
+```{r logit-setup}
+# The three log-return regressors (SP500, USD_PHP, WTI) are expressed in percent for
+# the logit models: coefficients are then per 1% move, odds ratios are readable and the
+# Firth fit converges at default settings. PSEi only defines the outcome (decimal units).
+crash_cut <- -0.05
+options(knitr.kable.NA = "")
+
+df_logit <- df_model |>
+  mutate(
+    across(c(SP500, USD_PHP, WTI), ~ .x * 100),
+    PSEI_UP    = as.integer(PSEI > 0),
+    PSEI_CRASH = as.integer(PSEI < crash_cut)
+  )
+
+out_A <- "A. Up month"
+out_B <- "B. Crash month"
+spec_full <- "full (9 regressors)"
+spec_core <- "core (USD_PHP, 10Y, WTI)"
+
+# realistic one-step moves used to express odds ratios (units of the logit data)
+move_size  <- c(USD_PHP = 1, PH_10Y_GS_Yield = 0.10, WTI = 5)
+move_label <- c(USD_PHP = "USD_PHP +1%", PH_10Y_GS_Yield = "10Y yield +10 bp", WTI = "WTI +5%")
+
+auc_fn <- function(p, y) {                       # rank-based (Mann-Whitney) AUC
+  r <- rank(p); n1 <- sum(y == 1); n0 <- sum(y == 0)
+  (sum(r[y == 1]) - n1 * (n1 + 1) / 2) / (n1 * n0)
+}
+loglik_bin <- function(p, y) sum(y * log(p) + (1 - y) * log(1 - p))
+
+# one-row fit summary from fitted probabilities (works for glm and logistf)
+logit_fit_row <- function(outcome, spec, y, p, lr_chisq, lr_df, aic = NA_real_, bic = NA_real_) {
+  n   <- length(y)
+  ll  <- loglik_bin(p, y)
+  ll0 <- loglik_bin(rep(mean(y), n), y)
+  tibble(
+    outcome = outcome, spec = spec, n = n, events = sum(y),
+    LR_chisq = lr_chisq, df = lr_df,
+    p_value  = pchisq(lr_chisq, lr_df, lower.tail = FALSE),
+    mcfadden_r2   = 1 - ll / ll0,
+    nagelkerke_r2 = (1 - exp(2 / n * (ll0 - ll))) / (1 - exp(2 / n * ll0)),
+    AIC = aic, BIC = bic,
+    auc = auc_fn(p, y),
+    accuracy = mean((p > 0.5) == y),
+    majority_accuracy = max(mean(y), 1 - mean(y))
+  )
+}
+logit_fit_glm <- function(outcome, spec, m)
+  logit_fit_row(outcome, spec, m$y, fitted(m), m$null.deviance - m$deviance,
+                m$df.null - m$df.residual, AIC(m), BIC(m))
+# logistf: loglik = c(full, null) penalized log-likelihoods; LR = -2 * diff
+logit_fit_firth <- function(outcome, spec, f)
+  logit_fit_row(outcome, spec, f$y, f$predict, -2 * diff(f$loglik), f$df)
+
+# odds ratio for a realistic move of each core driver, with its confidence interval
+move_table <- function(est, low, high, label) {
+  tm <- names(move_size)
+  tibble(model = label, term = tm, move = unname(move_label[tm]),
+         odds_ratio = unname(exp(est[tm] * move_size[tm])),
+         or_low     = unname(exp(low[tm]  * move_size[tm])),
+         or_high    = unname(exp(high[tm] * move_size[tm])))
+}
+
+print_coef <- function(tab, caption) {
+  tab |>
+    mutate(across(any_of(c("p_value", "p_hc3")), fmt_p),
+           across(where(is.numeric), ~ signif(.x, 4))) |>
+    fit_kable(caption = caption)
+}
+
+tibble(
+  outcome = c(out_A, paste0(out_B, " (return < ", 100 * crash_cut, "%)")),
+  n       = nrow(df_logit),
+  events  = c(sum(df_logit$PSEI_UP), sum(df_logit$PSEI_CRASH))
+) |>
+  mutate(
+    non_events    = n - events,
+    pct_events    = round(100 * events / n, 1),
+    epv_full      = round(pmin(events, non_events) / length(regressors), 1),
+    epv_core      = round(pmin(events, non_events) / length(regs_core), 1)
+  ) |>
+  fit_kable(caption = "Binary outcomes (EPV = events per regressor; below 10 is thin, below 5 is very thin)")
+```
+
+## Logistic Regression A: Up-month logit
+
+```{r logit-a-up}
+# H0 for each slope: the regressor does not change the log-odds of an up month.
+logit_up_full <- glm(reformulate(regressors, "PSEI_UP"), data = df_logit, family = binomial)
+logit_up_core <- glm(reformulate(regs_core,  "PSEI_UP"), data = df_logit, family = binomial)
+
+# classical (Wald) and HC3-robust p-values; odds ratios with profile-likelihood CIs
+logit_coef_glm <- function(m) {
+  ct <- coeftest(m)
+  ch <- coeftest(m, vcov. = hc3(m))
+  ci <- suppressMessages(confint(m))
+  tibble(
+    term       = rownames(ct),
+    estimate   = ct[, 1],
+    std_error  = ct[, 2],
+    p_value    = ct[, 4],
+    p_hc3      = ch[, 4],
+    odds_ratio = exp(ct[, 1]),
+    or_low     = exp(ci[, 1]),
+    or_high    = exp(ci[, 2]),
+    signif     = case_when(ct[, 4] < 0.001 ~ "***", ct[, 4] < 0.01 ~ "**",
+                           ct[, 4] < 0.05 ~ "*", ct[, 4] < 0.10 ~ ".", TRUE ~ "")
+  )
+}
+coef_up_full <- logit_coef_glm(logit_up_full)
+coef_up_core <- logit_coef_glm(logit_up_core)
+
+print_coef(coef_up_full, "A. Up-month logit, full model (log-odds; odds ratios are per 1 unit of each regressor)")
+print_coef(coef_up_core, "A. Up-month logit, core model")
+
+fit_up <- bind_rows(
+  logit_fit_glm(out_A, spec_full, logit_up_full),
+  logit_fit_glm(out_A, spec_core, logit_up_core)
+)
+
+fit_up |>
+  select(spec, LR_chisq, df, p_value, mcfadden_r2, nagelkerke_r2, AIC, BIC) |>
+  mutate(p_value = fmt_p(p_value), across(where(is.numeric), ~ signif(.x, 4))) |>
+  fit_kable(caption = "A. Likelihood-ratio test against the intercept-only model, pseudo-R-squared and information criteria")
+
+# nested likelihood-ratio test: the six non-core regressors
+a_up <- anova(logit_up_core, logit_up_full, test = "Chisq")
+tibble(test = "Nested LR test: drop the six non-core regressors (H0: all zero)",
+       chisq = signif(a_up$Deviance[2], 4), df = a_up$Df[2],
+       p_value = fmt_p(a_up[["Pr(>Chi)"]][2])) |>
+  fit_kable(caption = "A. Can the six non-core regressors be dropped?")
+
+# odds ratios for realistic moves (core model)
+ci_up_core <- suppressMessages(confint(logit_up_core))
+move_up <- move_table(coef(logit_up_core), ci_up_core[, 1], ci_up_core[, 2], out_A)
+move_up |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = "A. Odds of an UP month for a realistic move (core model; OR below 1 lowers the odds)")
+```
+
+Model A asks what separates a month in which the PSEi rises from one in which it falls. The full model is jointly significant (likelihood-ratio chi-square(9) = 44.5, p < 0.0001; McFadden R-squared 0.33) and ranks months well: its in-sample AUC of 0.87 means that a randomly chosen up month receives a higher predicted probability than a randomly chosen down month in 87% of pairs. Only two regressors matter. A 1% depreciation of the peso multiplies the odds of an up month by 0.39 (95% CI 0.24 to 0.59) and a 10 basis point rise in the 10-year yield multiplies them by 0.78 (95% CI 0.64 to 0.92), and both remain significant with HC3 standard errors (p = 0.004 and p = 0.024). WTI, the S&P 500, the VIX, inflation, M3, manufacturing production and the policy rate do not change the odds, and dropping all six non-core regressors is not rejected (chi-square = 3.93, p = 0.69). The core model that keeps the peso, the yield and WTI therefore fits almost as well (McFadden R-squared 0.30) and is preferred by the information criteria (AIC 100.5 against 108.6, BIC 110.8 against 134.2). In financial terms, an ordinary down month is a month in which the peso weakens and long-term yields rise, the same two channels that the linear model found, now expressed as odds.
+
+```{r logit-a-diagnostics, fig.height=4}
+# Diagnostics for the up-month logit (full model).
+# Multicollinearity is the same design as the MLR; classification and calibration
+# replace the residual plots.
+vif_up <- car::vif(logit_up_full)
+tibble(statistic = c("Largest VIF", "Mean VIF"),
+       value = round(c(max(vif_up), mean(vif_up)), 3)) |>
+  fit_kable(caption = "A. Variance inflation factors (regressors as in the MLR)")
+
+# calibration: predicted vs observed rate by quintile of predicted probability
+calib_table <- function(y, p, groups = 5) {
+  tibble(y = y, p = p) |>
+    mutate(bin = ntile(p, groups)) |>
+    group_by(bin) |>
+    summarise(n = n(), mean_predicted = mean(p), observed_rate = mean(y),
+              events = sum(y), expected = sum(p), .groups = "drop")
+}
+hosmer_lemeshow <- function(ct) {
+  stat <- sum((ct$events - ct$expected)^2 / (ct$expected * (1 - ct$expected / ct$n)))
+  list(statistic = c(HL = stat), parameter = c(df = nrow(ct) - 2),
+       p.value = pchisq(stat, nrow(ct) - 2, lower.tail = FALSE))
+}
+cal_up <- calib_table(logit_up_full$y, fitted(logit_up_full))
+cal_up |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = "A. Calibration by quintile of predicted probability (full model)")
+
+# Pregibon-type link test: does the squared linear predictor add anything?
+df_link <- df_logit |> mutate(eta2 = predict(logit_up_full, type = "link")^2)
+logit_up_link <- glm(reformulate(c(regressors, "eta2"), "PSEI_UP"), data = df_link, family = binomial)
+a_link <- anova(logit_up_full, logit_up_link, test = "Chisq")
+
+dev_res_up <- residuals(logit_up_full, type = "deviance")
+bind_rows(
+  htest_row("Hosmer-Lemeshow, 5 groups (H0: well calibrated)", hosmer_lemeshow(cal_up)),
+  htest_row("Link test: squared linear predictor (H0: logit link adequate)",
+            list(statistic = c(LR = a_link$Deviance[2]), parameter = c(df = 1),
+                 p.value = a_link[["Pr(>Chi)"]][2])),
+  htest_row("Ljung-Box, 12 lags (deviance residuals)",
+            Box.test(dev_res_up, lag = 12, type = "Ljung-Box"))
+) |>
+  mutate(statistic = signif(statistic, 4)) |>
+  fit_kable(caption = "A. Goodness-of-fit, functional-form and autocorrelation tests")
+
+# influence: Cook's distance
+tibble(year_month = df_logit$year_month, cooks_d = cooks.distance(logit_up_full),
+       psei_return = df_logit$PSEI, up = df_logit$PSEI_UP) |>
+  arrange(desc(cooks_d)) |>
+  slice_head(n = 5) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = sprintf("A. Five most influential months (Cook's D cut-off 4/n = %.3f)",
+                                 4 / nrow(df_logit)))
+```
+
+The diagnostics give no reason to doubt Model A. The regressors are not collinear (largest VIF 1.96, mean 1.39), the Hosmer-Lemeshow test does not reject calibration (p = 0.43), the squared linear predictor adds nothing, so the logit link is adequate (p = 0.99), and the deviance residuals show no autocorrelation (Ljung-Box p = 0.95). In the calibration table the predicted and observed up-month rates rise together, from roughly 8% and 10% in the lowest quintile to roughly 93% and 89% in the highest, although the second quintile is over-predicted (27% against 16%), a gap of about two months in a group of 19. No month is influential: the largest Cook's distance, 0.165 for December 2022, is far below 1, and March 2020 is not among the five largest, because a binary outcome records only that the market fell and not by how much.
+
+## Logistic Regression B: Crash-month logit (Firth penalized likelihood)
+
+```{r logit-b-crash}
+# H0 for each slope: the regressor does not change the log-odds of a crash month.
+# Penalized-likelihood (profile) p-values and confidence intervals from logistf.
+logit_crash_full <- logistf(reformulate(regressors, "PSEI_CRASH"), data = df_logit)
+logit_crash_core <- logistf(reformulate(regs_core,  "PSEI_CRASH"), data = df_logit)
+
+logit_coef_firth <- function(f) {
+  tibble(
+    term       = names(f$coefficients),
+    estimate   = f$coefficients,
+    std_error  = sqrt(diag(f$var)),
+    p_value    = f$prob,
+    ci_low     = f$ci.lower,
+    ci_high    = f$ci.upper,
+    odds_ratio = exp(f$coefficients),
+    signif     = case_when(f$prob < 0.001 ~ "***", f$prob < 0.01 ~ "**",
+                           f$prob < 0.05 ~ "*", f$prob < 0.10 ~ ".", TRUE ~ "")
+  )
+}
+coef_crash_full <- logit_coef_firth(logit_crash_full)
+coef_crash_core <- logit_coef_firth(logit_crash_core)
+
+print_coef(coef_crash_full, "B. Crash-month logit (Firth), full model: penalized-likelihood p-values and 95% CIs")
+print_coef(coef_crash_core, "B. Crash-month logit (Firth), core model")
+
+fit_crash <- bind_rows(
+  logit_fit_firth(out_B, spec_full, logit_crash_full),
+  logit_fit_firth(out_B, spec_core, logit_crash_core)
+)
+
+fit_crash |>
+  select(spec, LR_chisq, df, p_value, mcfadden_r2, nagelkerke_r2) |>
+  mutate(p_value = fmt_p(p_value), across(where(is.numeric), ~ signif(.x, 4))) |>
+  fit_kable(caption = "B. Penalized likelihood-ratio test against the intercept-only model and pseudo-R-squared (AIC/BIC are not defined for a penalized fit)")
+
+# Is Firth needed? Compare with the ordinary maximum-likelihood fit and check for separation.
+ml_warnings <- character()
+logit_crash_ml <- withCallingHandlers(
+  glm(reformulate(regressors, "PSEI_CRASH"), data = df_logit, family = binomial),
+  warning = function(w) { ml_warnings <<- c(ml_warnings, conditionMessage(w)); invokeRestart("muffleWarning") }
+)
+tibble(
+  term           = names(coef(logit_crash_ml)),
+  ml_estimate    = coef(logit_crash_ml),
+  firth_estimate = logit_crash_full$coefficients[names(coef(logit_crash_ml))]
+) |>
+  mutate(shrinkage_pct = 100 * (1 - firth_estimate / ml_estimate)) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = sprintf(
+    "B. Firth vs maximum likelihood. ML converged: %s; warnings: %d; max fitted probability: %.3f",
+    logit_crash_ml$converged, length(ml_warnings), max(fitted(logit_crash_ml))))
+
+# odds ratios for realistic moves (core model)
+move_crash <- move_table(logit_crash_core$coefficients, logit_crash_core$ci.lower,
+                         logit_crash_core$ci.upper, out_B)
+move_crash |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = "B. Odds of a CRASH month for a realistic move (core model; OR above 1 raises the odds)")
+```
+
+Model B asks what separates a crash month, a return below -5%, from the other 75. The Firth fit is jointly significant (penalized likelihood-ratio chi-square(9) = 35.8, p < 0.0001; McFadden R-squared 0.42; AUC 0.91), and its pattern mirrors Model A with the signs reversed, as it should: the drivers that lower the odds of an up month raise the odds of a crash. A 1% depreciation of the peso multiplies the odds of a crash month by 2.65 (95% CI 1.67 to 4.83) and a 10 basis point rise in the 10-year yield by 1.22 (95% CI 1.01 to 1.53), the peso effect being the stronger and the more precisely estimated. WTI enters with a negative sign: a 5% rise in oil multiplies the odds of a crash by 0.75 (95% CI 0.49 to 0.96), so crashes tend to coincide with falling oil, the pattern of a demand shock and not of the cost channel that makes oil a burden for an importer. The up-month model found no oil effect, so oil is a tail variable, a point tested below because it rests on one month.
+
+Our choice of the Firth estimator is supported by the data. The comparison table shows that the ordinary maximum-likelihood fit converges without warning and that its highest fitted probability is 0.997, so there is no complete separation, yet every coefficient is 10% to 30% larger in absolute value than its penalized counterpart (the peso coefficient by 20%, the yield by 22% and oil by 24%). This is the small-sample bias that @firth_bias_1993 corrects and that @peduzzi_simulation_1996 warn about when events per variable are few, so maximum likelihood would have overstated every effect. @puhr_firths_2017 note that the penalty can inflate predicted probabilities when events are very rare; with crashes in 22% of months this concern is small, and the calibration check below shows no systematic over-prediction in the quintiles that hold the crashes.
+
+```{r logit-b-diagnostics}
+# Sensitivity of model B to the (arbitrary) crash threshold, core model.
+cut_grid <- c(`-4%` = -0.04, `-5%` = -0.05, `-6%` = -0.06,
+              `bottom 20%` = unname(quantile(df_logit$PSEI, 0.20)))
+
+imap(cut_grid, function(cut, label) {
+  d <- df_logit |> mutate(y = as.integer(PSEI < cut))
+  f <- logistf(reformulate(regs_core, "y"), data = d)
+  tibble(
+    threshold  = label,
+    cutoff     = cut,
+    events     = sum(d$y),
+    LR_p       = fmt_p(pchisq(-2 * diff(f$loglik), f$df, lower.tail = FALSE)),
+    auc        = auc_fn(f$predict, d$y),
+    b_USD_PHP  = f$coefficients[["USD_PHP"]],
+    p_USD_PHP  = fmt_p(f$prob[["USD_PHP"]]),
+    b_10Y      = f$coefficients[["PH_10Y_GS_Yield"]],
+    p_10Y      = fmt_p(f$prob[["PH_10Y_GS_Yield"]]),
+    b_WTI      = f$coefficients[["WTI"]],
+    p_WTI      = fmt_p(f$prob[["WTI"]])
+  )
+}) |>
+  bind_rows() |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = "B. Crash-threshold sensitivity (core model, Firth)")
+
+# calibration and leverage (full model)
+cal_crash <- calib_table(logit_crash_full$y, logit_crash_full$predict)
+cal_crash |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = "B. Calibration by quintile of predicted probability (full model)")
+
+tibble(year_month = df_logit$year_month, hat = logit_crash_full$hat.diag,
+       psei_return = df_logit$PSEI, crash = df_logit$PSEI_CRASH) |>
+  arrange(desc(hat)) |>
+  slice_head(n = 5) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = sprintf("B. Five highest-leverage months (Firth hat values; 2k/n = %.3f)",
+                                 2 * length(logit_crash_full$coefficients) / nrow(df_logit)))
+```
+
+Three checks test whether Model B depends on how it is set up. First, the -5% threshold is arbitrary, and the sensitivity table shows that it matters little. At -4% (24 crash months), at -5% and at the bottom 20% of months (a cut-off of -5.4%, 19 months) the peso, yield and oil effects are all significant at the 5% level. At -6% (12 months) the peso effect stays significant (p = 0.015), oil does too (p = 0.044) and the yield is borderline (p = 0.059), which is what a dozen events can support. The in-sample AUC falls from 0.91 to 0.84 as the events thin out. Second, calibration is reasonable where it matters: in the two quintiles that hold the crashes the model expects 5.6 and 13.1 crashes and observes 6 and 14, and it over-predicts only in two low-risk quintiles in which no crash occurred (0.2 and 2.4 expected), the scatter to be expected with 19 months per group. Third, March 2020 has a Firth leverage of 0.78 against a cut-off of 0.21, more than three times the cut-off and almost twice the next highest month (July 2021, 0.41), so the fit leans on that month more than on any other, and the next step tests how much.
+
+```{r logit-march-2020}
+# re-estimate the core models without March 2020 (PSEi -24%, the dominant influential month in the MLR). A binary outcome caps that month's influence, so the interesting question is which drivers are stable.
+
+d_nm <- df_logit |> filter(year_month != as.Date("2020-03-01"))
+core_terms <- regs_core
+
+bind_rows(
+  tibble(model = out_A, sample = "all months",
+         !!!as.list(setNames(coef_up_core$p_value[match(core_terms, coef_up_core$term)], core_terms))),
+  tibble(model = out_A, sample = "without March 2020",
+         !!!as.list(summary(glm(reformulate(regs_core, "PSEI_UP"), data = d_nm,
+                                family = binomial))$coefficients[core_terms, 4])),
+  tibble(model = out_B, sample = "all months",
+         !!!as.list(logit_crash_core$prob[core_terms])),
+  tibble(model = out_B, sample = "without March 2020",
+         !!!as.list(logistf(reformulate(regs_core, "PSEI_CRASH"), data = d_nm)$prob[core_terms]))
+) |>
+  mutate(across(all_of(core_terms), fmt_p)) |>
+  fit_kable(caption = "p-values of the core drivers with and without March 2020")
+```
+
+Re-estimating the core models without March 2020 shows which findings are specific to that month. The peso is not: its p-value is below 0.0001 in both models with and without the month. The yield is almost unchanged (p = 0.006 against 0.007 in Model A and 0.037 against 0.034 in Model B). Oil is different. In Model A, where it was never significant, it stays insignificant (p = 0.20), but in Model B its p-value moves from 0.016 to 0.084, so the effect of oil on the odds of a crash disappears once March 2020 is set aside. The linear model reached the same conclusion by a different route, since WTI was significant there only while March 2020 was given weight (Section 8), and it is the one result of this section that rests on a single episode. A binary outcome does limit the damage that one month can do, because March 2020 counts as one crash like any other, but it does not remove it in Model B, where the month is both a crash and the most leveraged observation. Our reading that follows is that the peso and the yield describe crashes in general, whereas oil describes the pandemic crash.
+
+## Cross-Validation and Out-Of-Time Check
+
+```{r logit-cv-oot}
+# Random-fold cross-validation (as in Section 8) and a time split. "CV skill" is 1 - (cross-validated log-loss) / (log-loss of the intercept-only model): positive means the regressors beat the base rate out of sample. The core models were chosen from the OLS results on the same data, so their cross-validated figures are somewhat optimistic; the full models involve no selection.
+
+d_A <- df_logit |> mutate(y = PSEI_UP)
+d_B <- df_logit |> mutate(y = PSEI_CRASH)
+
+fit_glm_logit <- function(vars) function(tr) {
+  m <- suppressWarnings(glm(reformulate(vars, "y"), data = tr, family = binomial))
+  function(te) suppressWarnings(predict(m, newdata = te, type = "response"))
+}
+fit_firth_logit <- function(vars) function(tr) {
+  f <- suppressWarnings(logistf(reformulate(vars, "y"), data = tr, pl = FALSE))
+  function(te) predict(f, newdata = te, type = "response")
+}
+
+cv_logit <- function(data, fit_fun, reps = 30, K = 10) {
+  rowMeans(replicate(reps, {
+    fold <- integer(nrow(data))
+    for (cl in 0:1) {                          # stratify on the outcome
+      i <- which(data$y == cl)
+      fold[i] <- sample(rep(seq_len(K), length.out = length(i)))
+    }
+    p <- p0 <- numeric(nrow(data))
+    for (k in seq_len(K)) {
+      tr <- data[fold != k, ]
+      te <- data[fold == k, ]
+      p[fold == k]  <- fit_fun(tr)(te)
+      p0[fold == k] <- mean(tr$y)
+    }
+    p[is.na(p)] <- mean(data$y)
+    p <- pmin(pmax(p, 1e-6), 1 - 1e-6)
+    c(cv_skill    = 1 - loglik_bin(p, data$y) / loglik_bin(p0, data$y),
+      cv_auc      = auc_fn(p, data$y),
+      cv_accuracy = mean((p > 0.5) == data$y))
+  }))
+}
+
+oot_logit <- function(data, fit_fun) {
+  tr <- filter(data, year_month <  as.Date("2023-01-01"))
+  te <- filter(data, year_month >= as.Date("2023-01-01"))
+  p  <- fit_fun(tr)(te)
+  tibble(oot_train_n = nrow(tr), oot_test_n = nrow(te), oot_events = sum(te$y),
+         oot_auc = auc_fn(p, te$y), oot_accuracy = mean((p > 0.5) == te$y),
+         oot_majority = max(mean(te$y), 1 - mean(te$y)))
+}
+
+validation_specs <- tribble(
+  ~outcome, ~spec,     ~data, ~fit,
+  out_A,    spec_full, list(d_A), list(fit_glm_logit(regressors)),
+  out_A,    spec_core, list(d_A), list(fit_glm_logit(regs_core)),
+  out_B,    spec_full, list(d_B), list(fit_firth_logit(regressors)),
+  out_B,    spec_core, list(d_B), list(fit_firth_logit(regs_core))
+)
+
+set.seed(2026)
+validation <- validation_specs |>
+  mutate(
+    cv  = map2(data, fit, ~ as_tibble_row(cv_logit(.x[[1]], .y[[1]]))),
+    oot = map2(data, fit, ~ oot_logit(.x[[1]], .y[[1]]))
+  ) |>
+  select(outcome, spec, cv, oot) |>
+  unnest(c(cv, oot))
+
+validation |>
+  select(outcome, spec, cv_skill, cv_auc, cv_accuracy) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  fit_kable(caption = "Repeated stratified 10-fold cross-validation (30 repeats)")
+
+validation |>
+  select(outcome, spec, oot_train_n, oot_test_n, oot_events, oot_auc, oot_accuracy, oot_majority) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  fit_kable(caption = "Out-of-time check: fit on 2018-2022, test on 2023-2025")
+```
+
+In-sample fit flatters a model, so the logits are also tested on months they did not see. Repeated stratified ten-fold cross-validation measures skill as the improvement in log-loss over always predicting the base rate. The full models beat the base rate (skill 0.14 for Model A and 0.22 for Model B) and the core models do so by more (0.25 and 0.32), with cross-validated AUCs from 0.80 (Model A, full) to 0.87 (Model B, core). The core figures are the more optimistic because the three core regressors were chosen on the same data, and the full-model figures, which involve no selection, are the fair comparison. The out-of-time check fits the models on 2018-2022 (60 months) and tests them on 2023-2025 (36 months), a later period that they never saw. The AUC holds up (0.83 for both full models, 0.89 and 0.95 for the core models) and accuracy exceeds the base rate in every case (for the full models 0.78 against 0.50 for Model A and 0.83 against 0.75 for Model B), but the test window holds only nine crash months, so the Model B result is indicative only.
+
+```{r logit-lag-check}
+# Do the same regressors explain next month's outcome? Each outcome is regressed on the regressors lagged one month. The same-month fits above are the comparison.
+spec_lag <- "full (9 regressors), lagged one month"
+lag_regs <- paste0("L_", regressors)
+
+df_lag <- df_logit |>
+  arrange(year_month) |>
+  mutate(across(all_of(regressors), dplyr::lag, .names = "L_{.col}")) |>
+  drop_na(all_of(lag_regs))
+
+lag_up    <- glm(reformulate(lag_regs, "PSEI_UP"), data = df_lag, family = binomial)
+lag_crash <- logistf(reformulate(lag_regs, "PSEI_CRASH"), data = df_lag)
+
+lag_check <- bind_rows(
+  filter(fit_up, spec == spec_full),
+  logit_fit_glm(out_A, spec_lag, lag_up),
+  filter(fit_crash, spec == spec_full),
+  logit_fit_firth(out_B, spec_lag, lag_crash)
+)
+
+lag_check |>
+  transmute(outcome,
+            regressors = if_else(spec == spec_full, "same month", "lagged one month"),
+            n, LR_p = fmt_p(p_value),
+            mcfadden_r2 = round(mcfadden_r2, 3), auc = round(auc, 3)) |>
+  fit_kable(caption = "Same-month versus one-month-lagged regressors (full models)")
+```
+
+The lag check separates explanation from prediction. If the regressors anticipated the market, last month's values would explain this month's outcome, and they do not. Lagged by one month, the full models lose almost all of their fit: McFadden R-squared falls from 0.33 to 0.03 for Model A and from 0.42 to 0.06 for Model B, the likelihood-ratio tests no longer reject (p = 0.94 and 0.83), and the AUCs fall to 0.59 and 0.66 from 0.87 and 0.91 in the same month. The out-of-time results above therefore show that the same-month relationship is stable between 2018-2022 and 2023-2025, not that the models can forecast. This agrees with the conclusion of Section 8 that models of this kind should not be relied on to anticipate crashes: the peso, the yield and oil move with the PSEi within the month, and the logit describes that co-movement, which is the purpose of our explanatory analysis.
+
+## Model Comparison
+
+```{r logit-compare, fig.height=4.5, fig.cap=c("In-sample ROC curves of the logistic models, full and core specifications)", "Logistic models: odds ratios for a realistic move in each driver, 95% intervals on a log scale")}
+fit_all <- bind_rows(fit_up, fit_crash)
+
+compare_tab <- fit_all |>
+  select(outcome, spec, events, p_value, mcfadden_r2, auc) |>
+  left_join(select(validation, outcome, spec, cv_skill, cv_auc, oot_auc),
+            by = c("outcome", "spec")) |>
+  rename(LR_p = p_value, auc_in_sample = auc)
+
+compare_tab |>
+  mutate(LR_p = fmt_p(LR_p), across(where(is.numeric), ~ round(.x, 3))) |>
+  fit_kable(caption = "Models A and B side by side (LR_p: likelihood-ratio test against the intercept-only model)")
+
+# ROC curves, in sample
+roc_points <- function(p, y, label) {
+  th <- sort(unique(c(0, p, 1)), decreasing = TRUE)
+  tibble(model = label,
+         tpr = map_dbl(th, ~ mean(p[y == 1] >= .x)),
+         fpr = map_dbl(th, ~ mean(p[y == 0] >= .x)))
+}
+roc_all <- bind_rows(
+  roc_points(fitted(logit_up_full),      logit_up_full$y,    paste0("A full (AUC = ",  round(fit_up$auc[1], 2), ")")),
+  roc_points(fitted(logit_up_core),      logit_up_core$y,    paste0("A core (AUC = ",  round(fit_up$auc[2], 2), ")")),
+  roc_points(logit_crash_full$predict,   logit_crash_full$y, paste0("B full (AUC = ",  round(fit_crash$auc[1], 2), ")")),
+  roc_points(logit_crash_core$predict,   logit_crash_core$y, paste0("B core (AUC = ",  round(fit_crash$auc[2], 2), ")"))
+) |>
+  mutate(outcome = if_else(startsWith(model, "A"), out_A, out_B))
+
+ggplot(roc_all, aes(fpr, tpr, colour = model)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_step(linewidth = 0.9) +
+  facet_wrap(~ outcome) +
+  labs(title = "In-sample ROC curves", x = "False-positive rate", y = "True-positive rate",
+       colour = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom", strip.text = element_text(face = "bold"))
+
+# the same driver moves the two outcomes in opposite directions: odds ratios per realistic move, with 95% intervals (log scale)
+bind_rows(move_up, move_crash) |>
+  mutate(move = factor(move, levels = rev(unname(move_label)))) |>
+  ggplot(aes(odds_ratio, move, colour = model)) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "firebrick") +
+  geom_pointrange(aes(xmin = or_low, xmax = or_high), position = position_dodge(width = 0.5)) +
+  scale_x_log10() +
+  labs(title = "Odds ratios for a realistic move (core models, 95% intervals)",
+       x = "Odds ratio (log scale)", y = NULL, colour = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+The ROC curves summarise discrimination. Each curve plots the share of true events that the model flags against the share of false alarms as the probability cut-off moves, and a curve well above the diagonal means good separation. Both outcomes are well separated, Model B (AUC 0.89 core, 0.91 full) more than Model A (0.84 and 0.87), and the core curves lie close to the full ones, which supports the core specification. The odds-ratio plot carries the financial message. The peso and the yield sit on opposite sides of 1 for the two outcomes, below 1 for an up month and above 1 for a crash, with intervals that exclude 1 in both models, so the conditions that make an ordinary good month less likely also make a crash more likely. Oil is the exception: its interval for an up month spans 1 (0.97 to 1.57) and for a crash lies just below 1 (0.49 to 0.96), an effect that depends on March 2020 as shown above.
+
+```{r logit-results, results='asis'}
+# Key results, generated from the fitted models above.
+p_txt <- function(p) { s <- fmt_p(p); if (startsWith(s, "<")) paste0("p ", s) else paste0("p = ", s) }
+sig_list <- function(tab) {
+  s <- tab$term[tab$term != "(Intercept)" & tab$p_value < alpha]
+  if (length(s)) paste(s, collapse = ", ") else "none"
+}
+pick <- function(tab, o, s, col) tab[[col]][tab$outcome == o & tab$spec == s]
+mv <- function(tab, term) tab$odds_ratio[tab$term == term]
+
+cat(sprintf(
+  "- **A. Up month** (%d of %d months). Full model: LR chi-square(%d) = %.1f, %s; McFadden R-squared = %.2f; in-sample AUC = %.2f. Significant at 5%%: %s. Core model odds of an up month: x%.2f for USD_PHP +1%%, x%.2f for the 10Y yield +10 bp.\n\n",
+  sum(df_logit$PSEI_UP), nrow(df_logit),
+  pick(fit_all, out_A, spec_full, "df"), pick(fit_all, out_A, spec_full, "LR_chisq"),
+  p_txt(pick(fit_all, out_A, spec_full, "p_value")),
+  pick(fit_all, out_A, spec_full, "mcfadden_r2"), pick(fit_all, out_A, spec_full, "auc"),
+  sig_list(coef_up_full), mv(move_up, "USD_PHP"), mv(move_up, "PH_10Y_GS_Yield")))
+
+cat(sprintf(
+  "- **B. Crash month** (%d of %d months, return below %.0f%%). Full model (Firth): penalized LR chi-square(%d) = %.1f, %s; McFadden R-squared = %.2f; in-sample AUC = %.2f. Significant at 5%%: %s. Core model odds of a crash: x%.2f for USD_PHP +1%%, x%.2f for the 10Y yield +10 bp, x%.2f for WTI +5%%.\n\n",
+  sum(df_logit$PSEI_CRASH), nrow(df_logit), 100 * crash_cut,
+  pick(fit_all, out_B, spec_full, "df"), pick(fit_all, out_B, spec_full, "LR_chisq"),
+  p_txt(pick(fit_all, out_B, spec_full, "p_value")),
+  pick(fit_all, out_B, spec_full, "mcfadden_r2"), pick(fit_all, out_B, spec_full, "auc"),
+  sig_list(coef_crash_full), mv(move_crash, "USD_PHP"), mv(move_crash, "PH_10Y_GS_Yield"),
+  mv(move_crash, "WTI")))
+
+cat(sprintf(
+  "- **Out of sample.** Cross-validated skill over the base rate, full / core: A %.2f / %.2f; B %.2f / %.2f. Out-of-time AUC (2023-2025), full / core: A %.2f / %.2f; B %.2f / %.2f (B has only %d crash months in the test window). Core figures are optimistic since the core set was chosen on the same data.\n\n",
+  pick(validation, out_A, spec_full, "cv_skill"), pick(validation, out_A, spec_core, "cv_skill"),
+  pick(validation, out_B, spec_full, "cv_skill"), pick(validation, out_B, spec_core, "cv_skill"),
+  pick(validation, out_A, spec_full, "oot_auc"), pick(validation, out_A, spec_core, "oot_auc"),
+  pick(validation, out_B, spec_full, "oot_auc"), pick(validation, out_B, spec_core, "oot_auc"),
+  pick(validation, out_B, spec_core, "oot_events")))
+```
+
+Taken together, these figures show that the logistic models separate months well and that the same two drivers do the work in both. Discrimination is strong in sample (AUC 0.87 for Model A and 0.91 for Model B) and falls by about 7 to 8 points in cross-validation (0.80 and 0.83), the ordinary loss when a model meets data it has not seen, and the models beat the base rate in every validation. Model A has more events (48) and steadier inference, whereas Model B discriminates better but rests on 21 events, a penalized estimator and one dominant month, which is why its intervals are wider and its oil result is the least secure.
+
+```{r interp-values}
+# Numbers quoted in the text below, pulled from the models fitted in Sections 5 and 9.
+f2  <- function(x) formatC(x, format = "f", digits = 2)
+ci2 <- function(lo, hi) paste0(f2(lo), " to ", f2(hi))
+mrow <- function(tab, term) tab[tab$term == term, ]
+a_usd <- mrow(move_up, "USD_PHP");    b_usd <- mrow(move_crash, "USD_PHP")
+a_10y <- mrow(move_up, "PH_10Y_GS_Yield"); b_10y <- mrow(move_crash, "PH_10Y_GS_Yield")
+a_wti <- mrow(move_up, "WTI");        b_wti <- mrow(move_crash, "WTI")
+val <- function(o, s, col) validation[[col]][validation$outcome == o & validation$spec == s]
+
+mlr_b <- coef(model_initial)                                   # MLR slopes (decimal returns)
+mlr_usd_pp <- f2(mlr_b[["USD_PHP"]])                           # pp of PSEi return per 1% depreciation
+mlr_10y_pp <- f2(mlr_b[["PH_10Y_GS_Yield"]] * 0.10 * 100)      # pp per +10 bp
+mlr_wti_pp <- f2(mlr_b[["WTI"]] * 5)                           # pp per +5% oil
+
+# one-month-lag check for the up-month model (table in Section 9)
+lag_A <- filter(lag_check, outcome == out_A, spec == spec_lag)
+
+# WTI log change in March 2020 (percent) and robustness figures for model B
+wti_mar20 <- formatC(df_logit$WTI[df_logit$year_month == as.Date("2020-03-01")], format = "f", digits = 0)
+p_wti_nm <-logistf(reformulate(regs_core, "PSEI_CRASH"), data = d_nm)$prob[["WTI"]]
+d_m6 <- df_logit |> mutate(y = as.integer(PSEI < -0.06))
+f_m6 <- logistf(reformulate(regs_core, "y"), data = d_m6)
+```
+
+Thus, in review, The logit was the appropriate advanced method for this study because it answered a question that the linear model could not, how likely a crash is and not only how large the average return is; because the diagnostics support its specification and the Firth estimator suits its thin events; and because its findings are consistent with the linear model while adding information about the tail. The Results below set the two sets of findings side by side, and the Analysis that follows states the limits of the evidence.
+
+## Results
+
+The MLR of Section 5 explains the size of the PSEi return (R-squared = `r f2(glance(model_initial)$r.squared)`). Only three of its nine regressors are individually significant, and AIC, AICc and BIC all prefer the three-regressor model. Its slopes, in percentage points of PSEi return, are `r mlr_usd_pp` per 1% peso depreciation, `r mlr_10y_pp` per 10 bp rise in the 10Y yield and `r mlr_wti_pp` per 5% rise in WTI. The logistic models above restate the same relationships as odds, and they agree with the MLR on which variables matter and on the signs.
+
+We observe that the Peso depreciation is the dominant channel. In the core models a 1% depreciation multiplies the odds of an up month by `r f2(a_usd$odds_ratio)` (95% CI `r ci2(a_usd$or_low, a_usd$or_high)`) and the odds of a crash month by `r f2(b_usd$odds_ratio)` (95% CI `r ci2(b_usd$or_low, b_usd$or_high)`). A weaker peso both signals and accompanies foreign selling, because foreign flows are an important driver of PSE prices and the peso moves with global risk appetite. This is why `SP500` and `VIX` add little once `USD_PHP` is in the model. Higher yields work against equities through the discount-rate channel: a 10 bp rise in the 10Y yield multiplies the odds of an up month by `r f2(a_10y$odds_ratio)` (`r p_txt(coef_up_core$p_value[coef_up_core$term == "PH_10Y_GS_Yield"])`) and the odds of a crash month by `r f2(b_10y$odds_ratio)` (`r p_txt(coef_crash_core$p_value[coef_crash_core$term == "PH_10Y_GS_Yield"])`). The yield effect is smaller and less precisely estimated than the peso's, and for crashes the interval (`r ci2(b_10y$or_low, b_10y$or_high)`) comes close to 1.
+
+Oil matters for the tail, not for direction, and mostly because of March 2020. A 5% rise in WTI does not significantly change the odds of an up month (odds ratio `r f2(a_wti$odds_ratio)`, 95% CI `r ci2(a_wti$or_low, a_wti$or_high)`), but it multiplies the odds of a crash month by `r f2(b_wti$odds_ratio)` (95% CI `r ci2(b_wti$or_low, b_wti$or_high)`). March 2020 is the one month in which a large oil collapse (a `r wti_mar20`% log change) coincided with a PSEi crash, a global-demand and risk-off shock, whereas the other large oil drops (November 2018, November 2021 and April 2025) came with PSEi gains. The oil result therefore registers as a single-episode demand shock, not as a stable cost channel. The domestic macro variables add nothing, since `PH_CPI`, `PH_M3`, `PH_Manufacturing_Production` and the BSP policy-rate change are not significant in either logit. Dropping all six non-core regressors from model A is not rejected (likelihood-ratio test, `r p_txt(a_up[["Pr(>Chi)"]][2])`), and a plausible reason is that these are slow-moving year-on-year series that markets price before the monthly figure is published.
+
+The logit adds to the MLR because the same variables that explain ordinary up and down months also explain crashes, while oil only enters the crash model, a distinction the MLR cannot show. A binary outcome also caps the weight of one extreme month, so model A is unaffected by dropping March 2020. Model B is not immune, because March 2020 is its highest-leverage month.
+
+## Analysis
+
+Reiterating, we stress that the models are explanatory, not forecasting, because the regressors are contemporaneous, as in the MLR. A check that lags every regressor by one month (see the lag-check table above) leaves almost no fit for the up-month model (McFadden R-squared `r f2(lag_A$mcfadden_r2)`, likelihood-ratio `r p_txt(lag_A$p_value)`, AUC `r f2(lag_A$auc)`). The models therefore describe what moves with the market in the same month, and they do not predict next month.
+
+The sample has `r sum(df_logit$PSEI_CRASH)` crash months in `r nrow(df_logit)`, about `r f2(sum(df_logit$PSEI_CRASH) / length(regressors))` events per regressor in the full model, so the crash results lean on the core model and on Firth's penalized likelihood, and the intervals are wide. Cross-validated skill over the base rate is `r f2(val(out_A, spec_core, "cv_skill"))` (A) and `r f2(val(out_B, spec_core, "cv_skill"))` (B) for the core models, and `r f2(val(out_A, spec_full, "cv_skill"))` and `r f2(val(out_B, spec_full, "cv_skill"))` for the full models. The core set was chosen from the OLS results on the same data, so the full-model figures are the fair comparison. On the 2023-2025 test window the core models reach an AUC of `r f2(val(out_A, spec_core, "oot_auc"))` (A) and `r f2(val(out_B, spec_core, "oot_auc"))` (B), but the window holds only `r val(out_B, spec_core, "oot_events")` crash months, so this is indicative only.
+
+Dropping March 2020 leaves `USD_PHP` and `PH_10Y_GS_Yield` essentially unchanged in both models, but the oil effect in model B loses significance (`r p_txt(p_wti_nm)`), so the oil finding is the least robust result. The results hold at -4%, -5% and the bottom 20% of months, while at -6% (`r sum(d_m6$y)` events) the peso effect remains but the yield effect becomes borderline (`r p_txt(f_m6$prob[["PH_10Y_GS_Yield"]])`). Finally, the peso, yields and the equity index all respond to global risk and to BSP policy at the same time, so the estimates show co-movement, not that a peso move causes a market move.
+

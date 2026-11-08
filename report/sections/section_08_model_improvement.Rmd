@@ -1,0 +1,391 @@
+# Section 8: Model Improvement Approaches
+
+The diagnostics of Section 7 found the initial model, the nine-regressor OLS fit of Section 5, sound in most respects. There is no multicollinearity (the largest variance inflation factor is 2.16), no autocorrelation (the Durbin-Watson, Breusch-Godfrey and Ljung-Box p-values are all above 0.4), no departure from normality (Shapiro-Wilk p = 0.42) and no sign of unstable coefficients (OLS-CUSUM p = 0.96, sup-F p = 0.31). Three findings do need attention, as the diagnostics summary table shows. The Breusch-Pagan test rejects constant error variance (p = 0.025), although the White test does not (p = 0.49). The RESET test rejects the linear functional form (p = 0.020). And seven months have a Cook's distance above 4/n, one of them, March 2020, at 1.55, against 0.28 for the next largest.
+
+Each problem calls for a remedy that fits its nature. Unequal error variance leaves the OLS coefficients unbiased and distorts only their standard errors, so we correct the standard errors with the HC3 estimator of @mackinnon_heteroskedasticity-consistent_1985, a refinement of the heteroskedasticity-consistent covariance matrix of @white_heteroskedasticity-consistent_1980. Weighted least squares would need a model of how the variance depends on the regressors, which a rejection by one of two tests cannot identify. Autocorrelation is absent, and Newey-West standard errors, which are compared with HC3 below, change no significance decision, so they are not needed as a remedy. Further transformation is not called for, because the regressors already have the stationary forms built in Section 3. The influence and specification findings call for a respecification, a dummy variable for March 2020, which we cross-check with robust regression [@huber_robust_1973; @yohai_high_1987] and compare with a reduced model.
+
+We analyze on one central finding. March 2020, the month of the COVID-19 market crash, has the highest leverage of the sample (0.57, against the 2k/n cut-off of 0.21), and the S&P 500, the VIX and WTI all take their most extreme values in it. We therefore ask of every remedy what survives once the pull of that month is controlled, and judge each by four criteria: valid inference, stable estimates, accuracy on held-out months, and parsimony. The Remedy Summary applies these criteria to the initial model and to all the remedies together.
+
+```{r remedy-setup}
+# Data and helpers for the corrective steps. Since everything is estimated on the same months and the same dependent variable (PSEI), the models are comparable.
+
+df_rem <- df_diag |>
+  mutate(MARCH_2020 = as.integer(year_month == as.Date("2020-03-01")))
+
+# Coefficient table with classical and HC3 inference. A single-month dummy gives that month leverage 1, which makes HC3 undefined; for such models (dummy = its name) the HC3 results for the other coefficients come from the fit without that month, which has identical coefficients, and the dummy keeps its classical standard error.
+
+inference_table <- function(m, dummy = NULL) {
+  ct_c <- coeftest(m)
+  if (is.null(dummy)) {
+    m_h <- m
+  } else {
+    m_h <- lm(update(formula(m), paste(". ~ . -", dummy)), data = df_rem[df_rem[[dummy]] == 0, ])
+    stopifnot(isTRUE(all.equal(unname(coef(m_h)), unname(coef(m)[names(coef(m_h))]))))
+  }
+  ct_h <- coeftest(m_h, vcov. = hc3(m_h))
+  ci_h <- coefci(m_h, vcov. = hc3(m_h), level = 0.95)
+  out <- tibble(
+    term         = rownames(ct_h),
+    estimate     = ct_h[, 1],
+    se_classical = ct_c[rownames(ct_h), 2],
+    se_hc3       = ct_h[, 2],
+    t_hc3        = ct_h[, 3],
+    p_classical  = ct_c[rownames(ct_h), 4],
+    p_hc3        = ct_h[, 4],
+    ci95_low     = ci_h[, 1],
+    ci95_high    = ci_h[, 2]
+  )
+  if (!is.null(dummy)) {
+    out <- bind_rows(out, tibble(term = dummy, estimate = ct_c[dummy, 1],
+                                 se_classical = ct_c[dummy, 2], p_classical = ct_c[dummy, 4]))
+  }
+  out
+}
+
+# one-row summary of fit and diagnostics for a model
+diag_summary <- function(m, label) {
+  e  <- residuals(m)
+  n  <- length(e)
+  cd <- cooks.distance(m)
+  tibble(
+    model           = label,
+    n               = n,
+    n_regressors    = length(coef(m)) - 1,
+    adj_r_squared   = summary(m)$adj.r.squared,
+    AIC             = AIC(m),
+    BIC             = BIC(m),
+    bp_p            = bptest(m)$p.value,
+    reset_p         = resettest(m, power = 2:3, type = "fitted")$p.value,
+    shapiro_p       = shapiro.test(e)$p.value,
+    dw_p            = dwtest(m, alternative = "two.sided")$p.value,
+    # an observation with leverage 1 (a single-month dummy) has an undefined Cook's D
+    max_cooks_d     = max(cd, na.rm = TRUE),
+    n_cooks_flagged = sum(cd > 4 / n, na.rm = TRUE)
+  )
+}
+```
+
+## Robust Standard Errors (HC3)
+```{r hc3}
+# robust standard errors. The OLS estimates stay the same; inference uses HC3, which is valid under heteroskedasticity of unknown form and performs better than HC0-HC2 in samples of this size. Residuals show no autocorrelation, so HAC is not needed. (The Newey-West comparison and its figure follow the table below.)
+
+tab_init <- inference_table(model_initial)
+
+tab_init |>
+  mutate(
+    se_ratio = se_hc3 / se_classical,
+    decision_changes = (p_classical < alpha) != (p_hc3 < alpha),
+    across(c(p_classical, p_hc3), fmt_p)
+  ) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  select(term, estimate, se_classical, se_hc3, se_ratio, t_hc3, p_classical, p_hc3,
+         ci95_low, ci95_high, decision_changes) |>
+  fit_kable(caption = "Initial model with HC3 standard errors (95% CIs use HC3)")
+```
+
+HC3 leaves the OLS coefficients as they were and changes only the standard errors, so it asks whether the conclusions of the baseline analysis depend on constant error variance. For eight of the nine regressors they do not. The standard errors of USD/PHP and of the 10-year yield move by less than 10 percent, and both stay significant (p < 0.0001 and p = 0.0045). The exception is WTI: its standard error rises by a factor of 2.4 and its p-value moves from 0.0006 to 0.147, so the significance it showed in the baseline model does not survive. The standard errors of the VIX and of manufacturing production roughly double as well, by a factor of about 2.1, although neither was significant to begin with. The overall F-test still rejects the null that all slopes are zero (F = 11.1, against 12.8 under classical errors), so the model remains jointly significant.
+
+The finding concerns WTI, and the question is why its significance depends on the estimator. HC3 corrects for unequal variance, but the classical standard errors also assume serially uncorrelated errors, and the Newey-West estimator [@newey_simple_1987] relaxes both. Comparing the classical, HC3 and Newey-West standard errors therefore separates two explanations: if a decision changes under HC3 alone, the cause is unequal variance or the leverage of particular months, and if it changes under Newey-West as well, serial dependence is also involved. The comparison below holds the coefficients fixed and varies only the covariance matrix, using a Newey-West bandwidth chosen from the data and, as a check, a fixed lag of six months.
+
+```{r robust-standard-errors, fig.height=8, fig.cap="95% confidence intervals of each coefficient by standard-error estimator (dashed line = 0)"}
+# Robustness of inference to the standard-error estimator. HC3 corrects for heteroskedasticity; Newey-West (HAC) also allows autocorrelation. The classical and HC3 results are in the table above; this chunk adds the Newey-West comparison.
+
+nw_lag_auto <- bwNeweyWest(model_initial, prewhite = FALSE)
+
+vcov_list <- list(
+  Classical            = vcov(model_initial),
+  HC3                  = hc3(model_initial),
+  `Newey-West (auto)`  = nw(model_initial),
+  `Newey-West (lag 6)` = nw(model_initial, lag = 6)
+)
+
+robust_results <- imap(vcov_list, function(V, method) {
+  ct <- coeftest(model_initial, vcov. = V)
+  ci <- coefci(model_initial, vcov. = V, level = 0.95)
+  tibble(
+    method   = method,
+    term     = rownames(ct),
+    estimate = ct[, 1],
+    std_error = ct[, 2],
+    t_stat   = ct[, 3],
+    p_value  = ct[, 4],
+    ci_lower = ci[, 1],
+    ci_upper = ci[, 2]
+  )
+}) |>
+  bind_rows() |>
+  mutate(method = factor(method, levels = names(vcov_list)))
+
+# significance decisions and inflation of standard errors relative to classical
+robust_results |>
+  filter(term != "(Intercept)") |>
+  group_by(term) |>
+  summarise(
+    `SE ratio HC3 / classical`        = std_error[method == "HC3"] / std_error[method == "Classical"],
+    `SE ratio NW (auto) / classical`  = std_error[method == "Newey-West (auto)"] / std_error[method == "Classical"],
+    sig_classical = p_value[method == "Classical"] < alpha,
+    sig_hc3       = p_value[method == "HC3"] < alpha,
+    sig_nw_auto   = p_value[method == "Newey-West (auto)"] < alpha,
+    sig_nw_lag6   = p_value[method == "Newey-West (lag 6)"] < alpha,
+    .groups = "drop"
+  ) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  fit_kable(caption = sprintf("Does the significance decision (5%%) change with the estimator? (Newey-West automatic bandwidth = %.2f)", nw_lag_auto))
+
+# 95% confidence intervals by estimator
+robust_results |>
+  filter(term != "(Intercept)") |>
+  mutate(term = factor(term, levels = regressors)) |>
+  ggplot(aes(y = method, colour = method)) +
+  geom_linerange(aes(xmin = ci_lower, xmax = ci_upper), linewidth = 1.2) +
+  geom_point(aes(x = estimate), size = 2, colour = "black") +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "firebrick") +
+  facet_wrap(~ term, scales = "free_x", ncol = 2) +
+  labs(title = "95% confidence intervals by standard-error estimator",
+       x = "Coefficient", y = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none", strip.text = element_text(face = "bold"))
+```
+
+At the 5 percent level, the decision is the same under all four estimators for eight of the nine regressors: the exchange rate and the yield are significant under every estimator, and the other six regressors are insignificant under every estimator. WTI is the only regressor whose decision depends on the estimator. It is significant under the classical and both Newey-West estimators and insignificant under HC3. The standard errors identify the source. The Newey-West standard errors of the exchange rate and the yield are about a fifth smaller than the classical ones and that of WTI is essentially unchanged, so allowing for serial dependence weakens no conclusion, whereas HC3 raises the standard error of WTI by a factor of 2.4. The interval figure shows the same pattern, with the WTI interval crossing zero under HC3 alone. The fragility of WTI is therefore a matter of unequal variance and influential months and not of autocorrelation, which agrees with the autocorrelation tests in the diagnostics and is why Newey-West is not carried forward as a remedy.
+
+HC3 is the appropriate estimator here for two reasons. It does not require the form of the heteroskedasticity to be known, which the diagnostic tests could not identify, and it is the variant that behaves best in samples below about 250 observations [@mackinnon_heteroskedasticity-consistent_1985; @long_using_2000], where this study has 96. It also treats the month at issue in the right way. HC3 divides each squared residual by the square of one minus the month's leverage, so March 2020, with the highest leverage of the sample, receives about 5.4 times the weight of a month with leverage near zero, which is why the standard errors of WTI and the VIX, whose most extreme values fall in that month, are the ones that inflate. Crisis episodes raise the variance of returns and can distort conventional measures of co-movement [@forbes_no_2002]. The correction is nonetheless partial, since it repairs the standard errors but leaves the estimates, and the pull of March 2020 on them, untouched. The next remedy addresses the month directly.
+
+## March 2020 Dummy Solution
+```{r march-dummy, fig.height=4, fig.cap="Cook's distance by month, initial model against the model with a March 2020 dummy (dashed line = 4/n)"}
+# a dummy for March 2020, the dominant influential observation (Cook's D, leverage, DFBETAS for WTI and VIX). It is a real, identifiable event (pandemic), # so we model rather than deleted. A single-month dummy fits that month , which makes the other coefficients identical to an OLS fit that omits March 2020, but the month stays in the sample and its effect is estimated.
+
+model_march <- lm(update(mlr_formula, . ~ . + MARCH_2020), data = df_rem)
+tab_march   <- inference_table(model_march, dummy = "MARCH_2020")
+
+tab_march |>
+  mutate(across(c(p_classical, p_hc3), fmt_p)) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = sprintf("Model with a March 2020 dummy (HC3 from the %d-month fit without March 2020; the dummy row uses its classical SE)", nrow(df_rem) - 1))
+
+tab_init |>
+  select(term, est_initial = estimate, p_initial = p_hc3) |>
+  inner_join(select(tab_march, term, est_march = estimate, p_march = p_hc3), by = "term") |>
+  mutate(
+    pct_change = 100 * (est_march - est_initial) / abs(est_initial),
+    sig_initial = p_initial < alpha,
+    sig_march   = p_march < alpha,
+    across(c(p_initial, p_march), fmt_p)
+  ) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = "Effect of the March 2020 dummy on the estimates (significance by HC3 p-values)")
+
+a <- anova(model_initial, model_march)
+tibble(test = "Nested F-test: add MARCH_2020 (H0: coefficient = 0)",
+       F = signif(a$F[2], 4), p_value = fmt_p(a[["Pr(>F)"]][2])) |>
+  fit_kable(caption = "Is the March 2020 dummy significant?")
+
+# influence before and after
+cd_march <- cooks.distance(model_march)
+infl_compare <- bind_rows(
+  tibble(model = "Initial", year_month = df_rem$year_month,
+         cooks_d = cooks.distance(model_initial)),
+  tibble(model = "March 2020 dummy", year_month = df_rem$year_month,
+         cooks_d = if_else(is.nan(cd_march), 0, cd_march))
+)
+
+ggplot(infl_compare, aes(year_month, cooks_d)) +
+  geom_col(width = 25) +
+  geom_hline(yintercept = 4 / nrow(df_rem), linetype = "dashed", colour = "firebrick") +
+  facet_wrap(~ model, ncol = 1, scales = "free_y") +
+  labs(title = "Cook's distance by month", subtitle = "dashed line: 4/n",
+       x = NULL, y = "Cook's D") +
+  theme_minimal()
+
+tibble(year_month = df_rem$year_month, cooks_d = cd_march) |>
+  filter(!is.nan(cooks_d)) |>
+  arrange(desc(cooks_d)) |>
+  slice_head(n = 5) |>
+  mutate(cooks_d = signif(cooks_d, 3)) |>
+  fit_kable(caption = "Most influential months after the March 2020 dummy")
+```
+
+Where HC3 corrects the standard errors, we present the dummy to correct the estimates. March 2020 is a real and identifiable event, the COVID-19 crash, so deleting it as though it were a data error would be hard to defend, while leaving it alone lets it dominate the fit. A dummy variable for the month avoids both choices: it gives the month its own intercept, the other coefficients then equal those of a fit without the month [@salkever_use_1976], and the month stays in the sample with its effect estimated. The dummy coefficient is -0.214 (p = 0.0004), and the nested F-test confirms that it belongs in the model (F = 13.5, p = 0.0004). Read as a prediction error, it says that the PSEi log return of -24.2 percent in March 2020 fell about 21 percentage points below the -2.7 percent that the other 95 months predict from the same regressors.
+
+The dummy resolves the three problems found in the diagnostics together. The Breusch-Pagan p-value rises from 0.025 to 0.129, the RESET p-value from 0.020 to 0.573, and the largest Cook's distance falls from 1.55 to 0.31, now belonging to July 2021, about a fifth of what March 2020 had; the adjusted R-squared rises from 0.528 to 0.588. The cost is one degree of freedom and our judgment that one month is exceptional. The effect on the coefficients is the more important result. The exchange-rate coefficient changes by 3 percent and the yield coefficient by 15 percent, and both stay significant under HC3, but the WTI coefficient falls by 61 percent, from 0.130 to 0.050, and is no longer significant (p = 0.17). Its apparent effect came from March 2020 and not from the other 95 months: a 10 percent rise in oil goes with a 1.3 percentage-point higher monthly return in the baseline model and with 0.5 once the month is controlled.
+
+## Robust Regression
+
+```{r robust-regression}
+# robust (M-estimation) regression. Huber and MM estimators downweight observations with large residuals instead of deleting them or modelling them with dummies. MM also resists high-leverage points. Weights show which months are treated as outliers. Standard errors are rlm's asymptotic ones; p-values use at distribution with n - k degrees of freedom (an approximation).
+
+rlm_huber <- MASS::rlm(mlr_formula, data = df_rem, maxit = 100)
+set.seed(2026)   # the MM initial estimate uses random subsampling
+rlm_mm    <- MASS::rlm(mlr_formula, data = df_rem, method = "MM", maxit = 100)
+
+rlm_inference <- function(m) {
+  cf <- summary(m)$coefficients
+  dfres <- nrow(df_rem) - nrow(cf)
+  tibble(
+    term     = rownames(cf),
+    estimate = cf[, "Value"],
+    se       = cf[, "Std. Error"],
+    t        = cf[, "t value"],
+    p        = 2 * pt(-abs(cf[, "t value"]), dfres),
+    ci95_low = estimate - qt(0.975, dfres) * se,
+    ci95_high = estimate + qt(0.975, dfres) * se
+  )
+}
+
+tab_huber <- rlm_inference(rlm_huber)
+tab_mm    <- rlm_inference(rlm_mm)
+
+tab_init |>
+  select(term, OLS = estimate, p_OLS_hc3 = p_hc3) |>
+  left_join(select(tab_huber, term, Huber = estimate, p_Huber = p), by = "term") |>
+  left_join(select(tab_mm,    term, MM = estimate,    p_MM = p),    by = "term") |>
+  mutate(across(starts_with("p_"), fmt_p)) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = "OLS vs Robust Regression (OLS p-values use HC3)")
+
+tibble(
+  estimator = c("OLS", "Huber", "MM"),
+  residual_scale = c(sigma(model_initial), rlm_huber$s, rlm_mm$s)
+) |>
+  mutate(residual_scale = signif(residual_scale, 4)) |>
+  fit_kable(caption = "Residual scale: robust fits are less inflated by outliers")
+
+# which months are downweighted
+tibble(year_month = df_rem$year_month,
+       residual_ols = residuals(model_initial),
+       weight_huber = rlm_huber$w,
+       weight_mm    = rlm_mm$w) |>
+  arrange(weight_mm) |>
+  slice_head(n = 10) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = "Ten most downweighted months (weight 1 = full weight)")
+```
+
+Robust regression gives a second answer to the same question without naming the month in advance. The Huber estimator downweights observations with large residuals [@huber_robust_1973], and the MM estimator also resists high-leverage points [@yohai_high_1987]; the weights show which months each treats as outliers. Huber lowers March 2020 to a weight of 0.41 and keeps it in the sample, while MM gives it a weight of zero, which treats the month as the dummy does. The residual scale falls from 0.041 under OLS to 0.039 under Huber and 0.037 under MM, which shows how much the outlying months inflated the error variance.
+
+Two regressors give the same answer as in the dummy model and the third a graded one. USD/PHP (-2.00 under Huber, -1.94 under MM) and the 10-year yield (-0.039 and -0.036) are significant under both estimators, with estimates close to the OLS values. WTI shows how the answer depends on the treatment of the month. Under MM, which discards March 2020, its coefficient is 0.054 and insignificant (p = 0.12), as in the dummy model; under Huber, which keeps the month at a reduced weight, it is 0.104 and significant (p = 0.003), between the OLS value and the dummy value. The significance of WTI therefore fades as the weight of March 2020 goes to zero, which is what one expects if the oil effect is carried by that single observation.
+
+## Reduced Model
+
+```{r reduced-model}
+# reduced model as a comparison (variable selection, not a fix for a diagnostic problem). BIC and the nested F-tests favoured USD_PHP, PH_10Y_GS_Yield and WTI; the March 2020 dummy is kept.
+
+model_reduced <- lm(reformulate(c(regs_core, "MARCH_2020"), "PSEI"), data = df_rem)
+tab_reduced   <- inference_table(model_reduced, dummy = "MARCH_2020")
+
+tab_reduced |>
+  mutate(across(c(p_classical, p_hc3), fmt_p)) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = sprintf("Reduced model with the March 2020 dummy (HC3 from the %d-month fit without March 2020)", nrow(df_rem) - 1))
+
+# nested test against the model with all regressors plus the dummy
+a <- anova(model_reduced, model_march)
+tibble(test = "Nested F-test: drop the six insignificant regressors (H0: all zero)",
+       F = signif(a$F[2], 4), p_value = fmt_p(a[["Pr(>F)"]][2])) |>
+  fit_kable(caption = "Can the six regressors be dropped?")
+```
+
+The last remedy is a statement about parsimony and not a direct repair of a diagnostic problem. The reduced model keeps the three regressors retained in the model-evaluation section, USD/PHP, the 10-year yield and WTI, and adds the March 2020 dummy. The nested F-test does not reject that the six omitted regressors are jointly zero (F = 0.98, p = 0.44), so little is lost by dropping them, and the fit is no worse with six fewer parameters: the adjusted R-squared is 0.588, equal to that of the dummy model, and the AIC (-347.0) and BIC (-331.7) are the lowest of all the OLS models, the BIC by 21 points. The residual diagnostics are clean (Breusch-Pagan p = 0.33, RESET p = 0.60, Shapiro-Wilk p = 0.99), and only two months have a Cook's distance above 4/n, the largest being 0.06.
+
+The coefficients are close to those of the full model with the dummy and are estimated more tightly. USD/PHP is -2.04 and the yield -0.041, both with HC3 p-values below 0.0001, and the dummy is -0.179, against -0.214 in the full model. WTI is 0.067 with an HC3 p-value of 0.055, on the 5 percent line, so the model keeps WTI because the information criteria and the nested tests favor it and not because the evidence for it is firm. We apply two cautions. The three regressors were chosen on this same sample, so the fit statistics and the cross-validated error reported next are somewhat optimistic [@heinze_variable_2018]. And a reduced model is a statement about parsimony, so it must keep the dummy and the HC3 standard errors to carry the same protection as the full model.
+
+## Remedy Summary
+```{r remedy-comparison, fig.height=9, fig.cap="95% confidence intervals of each coefficient: OLS (HC3), March 2020 dummy (HC3), Huber and MM robust regression (dashed line = 0)"}
+# Compare the initial model with every remedy: fit, information criteria,
+# diagnostics, cross-validated error, and coefficients. Cross-validation uses 10
+# random folds (time order is ignored); March 2020 errors are reported separately
+# because a held-out dummy month cannot be predicted by its own dummy. The robust
+# fits are compared on cross-validated error only: their weighted likelihood,
+# R-squared and residual tests are not comparable with the OLS ones.
+set.seed(2026)
+foldid <- sample(rep(1:10, length.out = nrow(df_rem)))
+
+# out-of-fold prediction errors, pooled over all months
+oof_errors <- function(fit_fun, data = df_rem) {
+  err <- numeric(nrow(data))
+  for (k in 1:10) {
+    train <- data[foldid != k, ]
+    test  <- data[foldid == k, ]
+    err[foldid == k] <- test$PSEI - suppressWarnings(predict(fit_fun(train), newdata = test))
+  }
+  err
+}
+
+ols_models <- list(
+  "Initial (OLS)"            = model_initial,
+  "March 2020 dummy"         = model_march,
+  "Reduced (core 3 + dummy)" = model_reduced
+)
+
+fit_funs <- list(
+  "Initial (OLS)"            = function(d) lm(mlr_formula, data = d),
+  "March 2020 dummy"         = function(d) lm(formula(model_march), data = d),
+  "Robust: Huber"            = function(d) MASS::rlm(mlr_formula, data = d, maxit = 100),
+  "Robust: MM"               = function(d) MASS::rlm(mlr_formula, data = d, method = "MM", maxit = 100),
+  "Reduced (core 3 + dummy)" = function(d) lm(formula(model_reduced), data = d)
+)
+
+mar_idx <- which(df_rem$year_month == as.Date("2020-03-01"))
+cv_table <- imap(fit_funs, function(f, label) {
+  e <- oof_errors(f, data = df_rem)
+  tibble(model = label, cv_rmse_all = sqrt(mean(e^2)),
+         cv_rmse_excl_mar2020 = sqrt(mean(e[-mar_idx]^2)))
+}) |>
+  bind_rows()
+
+ols_summary <- imap(ols_models, ~ diag_summary(.x, .y)) |> bind_rows()
+
+cv_table |>
+  left_join(select(ols_summary, model, n_regressors, adj_r_squared, AIC, BIC), by = "model") |>
+  select(model, n_regressors, adj_r_squared, AIC, BIC, cv_rmse_all, cv_rmse_excl_mar2020) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 4))) |>
+  fit_kable(caption = "Fit and 10-fold cross-validated RMSE (robust fits: cross-validated error only)")
+
+ols_summary |>
+  select(model, bp_p, reset_p, shapiro_p, dw_p, max_cooks_d, n_cooks_flagged) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = "Diagnostics re-run on each OLS model (Breusch-Pagan, RESET, Shapiro-Wilk, Durbin-Watson p-values)")
+
+# coefficients side by side: OLS rows use HC3 p-values, robust rows rlm's p-values
+coef_sources <- list(
+  "Initial (OLS)"            = tab_init |> transmute(term, estimate, p = coalesce(p_hc3, p_classical)),
+  "March 2020 dummy"         = tab_march |> transmute(term, estimate, p = coalesce(p_hc3, p_classical)),
+  "Reduced (core 3 + dummy)" = tab_reduced |> transmute(term, estimate, p = coalesce(p_hc3, p_classical)),
+  "Robust: Huber"            = tab_huber |> transmute(term, estimate, p),
+  "Robust: MM"               = tab_mm |> transmute(term, estimate, p)
+)
+
+imap(coef_sources, function(tab, label) {
+  tab |> transmute(term, model = label, cell = sprintf("%.4g (p=%s)", estimate, fmt_p(p)))
+}) |>
+  bind_rows() |>
+  mutate(model = factor(model, levels = names(coef_sources))) |>
+  pivot_wider(names_from = model, values_from = cell) |>
+  fit_kable(caption = "Coefficients by model (p-values: HC3 for OLS rows; the March dummy rows use classical)")
+
+# 95% confidence intervals for the nine original regressors
+ci_models <- bind_rows(
+  tab_init  |> transmute(model = "OLS (HC3)", term, estimate, ci95_low, ci95_high),
+  tab_march |> transmute(model = "March 2020 dummy (HC3)", term, estimate, ci95_low, ci95_high),
+  tab_huber |> transmute(model = "Huber", term, estimate, ci95_low, ci95_high),
+  tab_mm    |> transmute(model = "MM", term, estimate, ci95_low, ci95_high)
+) |>
+  filter(term %in% regressors) |>
+  mutate(model = factor(model, levels = c("OLS (HC3)", "March 2020 dummy (HC3)", "Huber", "MM")),
+         term  = factor(term, levels = regressors))
+
+ggplot(ci_models, aes(y = model, colour = model)) +
+  geom_linerange(aes(xmin = ci95_low, xmax = ci95_high), linewidth = 1.2) +
+  geom_point(aes(x = estimate), size = 2, colour = "black") +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "firebrick") +
+  facet_wrap(~ term, scales = "free_x", ncol = 2) +
+  labs(title = "95% confidence intervals: OLS, March 2020 dummy, and robust regression",
+       x = "Coefficient", y = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none", strip.text = element_text(face = "bold"))
+```
+
+Judged by the four criteria, the remedies line up in a clear order. On valid inference, HC3 removes the unreliable significance of WTI, and the dummy and the reduced model carry the correction forward. On stable estimates, the dummy and the reduced model remove the dependence on March 2020: between the initial and the reduced model the Breusch-Pagan p-value rises from 0.025 to 0.33, the RESET p-value from 0.020 to 0.60, and the largest Cook's distance falls from 1.55 to 0.06. On accuracy for held-out months, the 10-fold cross-validated RMSE falls from 0.0494 for the initial model to 0.0473 for the dummy model and 0.0428 for the reduced model, a reduction of 13 percent, and the ranking is the same when March 2020 is excluded from the error (0.0444, 0.0421 and 0.0388). Of the robust fits, MM matches the dummy model (0.0473) and Huber is slightly worse (0.048). On parsimony, the reduced model has four regressors against ten and the lowest BIC. The reduced model with the March 2020 dummy and HC3 standard errors is therefore the model carried forward, with the caution that its regressors were chosen on the same data, so cross-validation is a fairer test than any in-sample statistic but not an independent one.
+
+What the comparison means for an investor is clearest coefficient by coefficient. The exposure to the exchange rate is reliable: a one percent depreciation of the peso goes with a monthly return about 2.0 percentage points lower under every remedy, with estimates between -1.94 and -2.05 and significance throughout. The exposure to the 10-year yield is also reliable, a 10 basis point rise going with a return 0.35 to 0.41 percentage points lower. The exposure to oil is conditional. The baseline relationship, a 10 percent rise in oil with a 1.3 percentage-point higher return, is carried by March 2020, and once the month is controlled the effect is about 0.5 points and no longer distinguishable from zero, so an oil hedge should not be sized from the baseline coefficient. The other six regressors remain unestablished, since the evidence neither supports nor rules out effects. One limit remains. The dummy rests on the judgment that one month is exceptional, and that judgment has a cost, which falls on tail risk that a model of the average return cannot describe. The next section therefore turns from the size of the average return to the probability of a rising or sharply falling month.
+

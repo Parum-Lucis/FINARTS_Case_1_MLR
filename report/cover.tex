@@ -1,0 +1,43 @@
+% Cover page for Case_Study_Report.Rmd (PDF output only).
+% Redefines \maketitle so the title, author and date from the YAML header
+% are typeset on their own page; the report then starts on page 1.
+\makeatletter
+% Professor shown on the cover; edit the name here.
+\newcommand{\coverprofessor}{DIOSCORO BAYLON JR.}
+\renewcommand{\maketitle}{%
+  \begin{titlepage}
+    \thispagestyle{empty}
+    \centering
+    \vspace*{\fill}
+    {\LARGE\bfseries \@title \par}
+    \vspace{1.6cm}
+    \rule{0.55\textwidth}{0.6pt}\par
+    \vspace{1.6cm}
+    {\Large
+      \renewcommand{\and}{\\[0.7em]}%
+      \begin{tabular}[t]{c}\@author\end{tabular}\par}
+    \vspace{1.4cm}
+    {\normalsize Submitted To \par}
+    \vspace{0.4em}
+    {\large \coverprofessor \par}
+    \vspace{1.4cm}
+    {\large \@date \par}
+    \vspace*{\fill}
+  \end{titlepage}%
+}
+\makeatother
+
+% Table of contents: roman page numbers for the contents page(s), then the report
+% restarts at page 1 on a fresh page. pandoc calls \tableofcontents right after \maketitle.
+\let\oldtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \pagenumbering{roman}%
+  \oldtableofcontents
+  \clearpage
+  \pagenumbering{arabic}%
+}
+
+% Table and figure captions ("Table 1: ...", "Figure 1: ...") are centred, also when they run to
+% more than one line (the default centres a one-line caption and justifies a longer one).
+\usepackage{caption}
+\captionsetup{justification=centering}

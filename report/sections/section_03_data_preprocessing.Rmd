@@ -1,0 +1,162 @@
+# Section 3: Data Preprocessing
+
+The series collected in the previous section cannot be used in a regression as they are. They differ in frequency: the PSEi, the USD/PHP exchange rate, the 10-year government bond yield, WTI crude oil, the S&P 500 and the VIX are daily, the BSP Target Reverse Repurchase (RRP) rate is a list of dated rates rather than a regular series, and consumer prices (CPI), M3 money supply and manufacturing production are monthly year-on-year rates. The daily series also follow different trading calendars, since the Philippine and U.S. markets are closed on different holidays. Because the macroeconomic series are published monthly, the calendar month is the unit of analysis. This section combines the sources into one monthly dataset from January 2018 to December 2025, transforms the price and rate series into returns or changes so that the model does not rest on persistent price levels, and then checks the quality of the result. The descriptive statistics and graphs of the finished dataset follow in Section 4.
+
+```{r consolidate main-dataframe}
+daily_financials <- psei_daily |>
+  full_join(usdphp_daily, by = "date") |>
+  full_join(ph_10y_daily, by = "date") |>
+  full_join(df_us_daily, by = "date") |>
+  arrange(date) |>
+  # forward fill missing based on last previous day/data
+  tidyr::fill(PSEI, USD_PHP, PH_10Y_GS_Yield, WTI, SP500, .direction = "down")
+
+# month-end value; NA (not size 0) when a month has no observations yet
+last_valid <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) NA_real_ else x[length(x)]
+}
+
+financial_monthly <- daily_financials |>
+  mutate(year_month = floor_date(date, unit = "month")) |>
+  group_by(year_month) |>
+  summarise(
+    PSEI            = last_valid(PSEI),
+    USD_PHP         = last_valid(USD_PHP),
+    PH_10Y_GS_Yield = last_valid(PH_10Y_GS_Yield),
+    WTI             = last_valid(WTI),
+    SP500           = last_valid(SP500),
+    VIX             = if (all(is.na(VIX))) NA_real_ else mean(VIX, na.rm = TRUE),
+    .groups         = "drop"
+  )
+
+# one row per month, Dec 2017 - Dec 2025
+month_spine <- tibble(
+  year_month = seq(floor_date(start_date, "month"),
+                   floor_date(end_date, "month"), by = "month")
+)
+
+# BSP RRP rate in force at each month-end
+rrp_monthly <- month_spine |>
+  mutate(
+    month_end    = ceiling_date(year_month, "month") - days(1),
+    rrp_idx      = findInterval(as.numeric(month_end), 
+                                as.numeric(rrp_1725$date)),
+    BSP_RRP_Rate = if_else(rrp_idx == 0, NA_real_,
+                           rrp_1725$BSP_RRP_Rate[pmax(rrp_idx, 1)])
+  ) |>
+  select(year_month, BSP_RRP_Rate)
+
+df_econometrics <- month_spine |>
+  left_join(financial_monthly, by = "year_month") |>
+  left_join(rrp_monthly,       by = "year_month") |>
+  left_join(cpi_monthly,       by = "year_month") |>
+  left_join(m3_monthly,        by = "year_month") |>
+  left_join(mfg_monthly,       by = "year_month") |>
+  arrange(year_month) |>
+  mutate(
+    # monthly log returns / log changes (month-end levels)
+    PSEI    = log(PSEI)    - log(lag(PSEI)),
+    SP500   = log(SP500)   - log(lag(SP500)),
+    USD_PHP = log(USD_PHP) - log(lag(USD_PHP)),
+    WTI     = log(WTI)     - log(lag(WTI)),
+    # month-end first differences
+    BSP_RRP_Rate    = BSP_RRP_Rate    - lag(BSP_RRP_Rate),
+    PH_10Y_GS_Yield = PH_10Y_GS_Yield - lag(PH_10Y_GS_Yield)
+    # PH_CPI, PH_M3, PH_Manufacturing_Production are already YoY %
+  ) |>
+  # drop 2017 since only 2018-2025
+  filter(year(year_month) >= 2018)
+
+# What the analysis dataset contains and how each column was built (transformations as required)
+variable_guide <- tribble(
+  ~variable,                     ~role,       ~transformation,
+  "PSEI",                        "Dependent", "Monthly log return",
+  "SP500",                       "Regressor", "Monthly log return",
+  "USD_PHP",                     "Regressor", "Monthly log change",
+  "BSP_RRP_Rate",                "Regressor", "Month-end first difference",
+  "PH_10Y_GS_Yield",             "Regressor", "Month-end first difference",
+  "PH_CPI",                      "Regressor", "YoY % change",
+  "PH_M3",                       "Regressor", "YoY % growth",
+  "PH_Manufacturing_Production", "Regressor", "YoY % growth",
+  "WTI",                         "Regressor", "Monthly log return",
+  "VIX",                         "Regressor", "Monthly average"
+)
+
+variable_guide |>
+  fit_kable(caption = sprintf(
+    "Analysis dataset: %d monthly observations (%s to %s), %d variables",
+    nrow(df_econometrics),
+    format(min(df_econometrics$year_month), "%b %Y"),
+    format(max(df_econometrics$year_month), "%b %Y"),
+    ncol(df_econometrics) - 1))
+
+# first 6 months, one row per variable so that all 10 variables fit the page width
+digits_by_var <- c(PSEI = 4, SP500 = 4, USD_PHP = 4, WTI = 4,
+                   PH_10Y_GS_Yield = 3, BSP_RRP_Rate = 3,
+                   VIX = 2, PH_CPI = 2, PH_M3 = 2, PH_Manufacturing_Production = 2)
+
+df_econometrics |>
+  head(6) |>
+  mutate(year_month = format(year_month, "%Y-%m")) |>
+  pivot_longer(-year_month, names_to = "variable", values_to = "value") |>
+  mutate(value = sprintf(paste0("%.", digits_by_var[variable], "f"), value)) |>
+  pivot_wider(names_from = year_month, values_from = value) |>
+  arrange(match(variable, variable_guide$variable)) |>
+  fit_kable(align = c("l", rep("r", 6)),
+               caption = "Analysis dataset: first 6 months, one row per variable")
+```
+
+We first join the four daily files on the date column. A full join keeps every date on which at least one series was observed, which gives `r nrow(daily_financials)` dates from 1 December 2017 to 31 December 2025. Where a series has no value on one of these dates, the last previous value is carried forward (`tidyr::fill()`), so that only information available on that date is used. The VIX is not filled, since its monthly average uses the days on which it was observed. The daily table is then collapsed to one row per month. For the PSEi, USD/PHP, the 10-year yield, WTI and the S&P 500, the value of the last available day of the month is kept (`last_valid()`, which returns a missing value instead of an empty result when a month has no observation), and the VIX is averaged over the month.
+
+The RRP rate is handled differently because a policy rate stays in force until a new one is set. For each month, the code takes the latest rate dated on or before the last day of that month (`findInterval()` on the dates), which turns the list of dated rates into a month-end series. CPI, M3 and manufacturing production are already monthly and are joined without change. All series are attached to a calendar with one row per month from December 2017 to December 2025. December 2017 is kept only as the base month, so that the first return and the first difference, for January 2018, can be computed.
+
+The variables are then transformed. The PSEi, S&P 500 and WTI become monthly log returns, the log of the month-end level minus the log of the previous month-end level, and the USD/PHP rate becomes the monthly log change in the same way. The RRP rate and the 10-year yield are already in percentage points, so they enter as month-end first differences. The three year-on-year series and the VIX are used as they are. After 2017 is dropped, the analysis dataset has `r nrow(df_econometrics)` monthly observations and 10 variables, the PSEi return as the dependent variable and nine regressors, as the variable guide above sets out. The first six months show the result: the PSEi log return was `r round(df_econometrics$PSEI[1], 4)` in January 2018 and `r round(df_econometrics$PSEI[2], 4)` in February 2018, and the RRP rate was unchanged until it rose by 0.25 percentage points in May 2018 and again in June 2018.
+
+Each transformation follows from how the variable behaves. Price levels such as the PSEi, the S&P 500, WTI and the exchange rate follow persistent paths, and a regression of one such series on another can show strong relationships that arise from the persistence alone [@granger_spurious_1974], so each is replaced by its return. The logarithmic return is used because a gain and a loss of the same log size cancel exactly, because it adds up over successive months, and because it is close to the simple percentage change for moves of the size seen in most months [@hudson_calculating_2015]. It exists only for positive prices, which is why oil is measured at month-end, when its price is positive in every month. Month-end values are used so that each return covers exactly one calendar month, from one month-end to the next. The RRP rate and the 10-year yield are already rates and move slowly and persistently, so their change over the month, in percentage points, is the new information that the month brings and is the natural measure of a policy move or a shift in yields. The VIX is a volatility index that fluctuates around a long-run level, so it is kept in levels and averaged over the month, which describes the risk climate of the whole month and not the sentiment of a single day.
+
+The three year-on-year series are already rates of change and are used as reported, because differencing them again would discard information and make their interpretation harder. They are, however, persistent, since each value shares eleven months of change with the previous one: the first-order autocorrelation is 0.95 for consumer prices, 0.94 for M3 and 0.73 for manufacturing production, against values close to zero for the PSEi, S&P 500, WTI and USD/PHP returns (all between -0.14 and 0.13). Whether this persistence leaves autocorrelation in the model residuals is tested in Section 7, which finds no evidence of it. The units of the final dataset are mixed, and the coefficients later in the report are read accordingly: log returns and changes are in decimal form (0.01 is one percent), the RRP rate and the yield in percentage points, the year-on-year rates in percent and the VIX in index points.
+
+```{r data-quality-checks}
+# check for structure: row count, month coverage, duplicates, gaps
+expected_months <- seq(ymd("2018-01-01"), ymd("2025-12-01"), by = "month")
+tibble(
+  rows               = nrow(df_econometrics),
+  expected_rows      = length(expected_months),
+  first_month        = min(df_econometrics$year_month),
+  last_month         = max(df_econometrics$year_month),
+  duplicate_months   = sum(duplicated(df_econometrics$year_month)),
+  missing_months     = sum(!expected_months %in% df_econometrics$year_month),
+  is_sorted          = !is.unsorted(df_econometrics$year_month)
+) |>
+  pivot_longer(everything(), names_to = "check", values_to = "value",
+               values_transform = as.character) |>
+  fit_kable(caption = "Structure and month coverage")
+
+# identify data types, missing, non-finite, constant columns
+df_econometrics |>
+  summarise(across(everything(), list(
+    type     = ~ class(.x)[1],
+    n_na     = ~ sum(is.na(.x)),
+    pct_na   = ~ round(100 * mean(is.na(.x)), 1),
+    n_inf    = ~ sum(is.infinite(.x)),
+    n_unique = ~ n_distinct(.x)
+  ), .names = "{.col}__{.fn}")) |>
+  pivot_longer(everything(), names_to = c("variable", ".value"),
+               names_sep = "__") |>
+  fit_kable(caption = "Data types, missing observations and non-finite values")
+
+# identify months with missing values
+df_econometrics |>
+  filter(if_any(-year_month, is.na)) |>
+  transmute(year_month, missing_vars = pmap_chr(pick(-year_month),
+              function(...) paste(names(c(...))[is.na(c(...))], collapse = ", "))) |>
+  fit_kable(caption = "Months with missing values")
+```
+
+Three groups of checks were run on the analysis dataset. The first checks its structure: the number of rows against the number of months expected between January 2018 and December 2025, the first and last month, and whether any month is duplicated, missing or out of order. The second reports the type of each column and counts its missing values, its infinite values, which a logarithm of zero would produce, and its distinct values, where a single distinct value would mean a constant column. The third lists the months with a missing value and names the variables that are missing in each.
+
+The dataset passes every structural check. It has `r nrow(df_econometrics)` rows against `r length(expected_months)` expected, runs from `r format(min(df_econometrics$year_month), "%B %Y")` to `r format(max(df_econometrics$year_month), "%B %Y")`, and has no duplicated or missing months. No column has a missing or infinite value, so the table of months with missing values has no rows and no month needed to be imputed or removed. The month column is stored as a date and all ten variables as numeric values, so the loading steps left no variable in the wrong type. No column is constant. The BSP RRP change takes only `r n_distinct(df_econometrics$BSP_RRP_Rate)` distinct values and is zero in `r sum(df_econometrics$BSP_RRP_Rate == 0)` of the `r nrow(df_econometrics)` months, because the rate is held unchanged in most months and, when it does move, moves in multiples of 0.25 percentage points. The other variables take between `r min(n_distinct(df_econometrics$PH_CPI), n_distinct(df_econometrics$PH_M3))` distinct values (PH_CPI, which is reported to one decimal place) and `r nrow(df_econometrics)`.
+
+A dataset that passes these checks is complete, but this does not show that every value is plausible. The year-on-year series, manufacturing production in particular, take very large values in 2020 and 2021 (from `r round(min(df_econometrics$PH_Manufacturing_Production), 0)`% to `r round(max(df_econometrics$PH_Manufacturing_Production), 0)`%), which coincide with the pandemic period. No observation inside the study window is corrected or excluded, for three reasons. The values are reported by the source and have an economic explanation, the collapse of output in the pandemic and the rebound measured against a low base (Section 2). Removing the most unusual months would discard the episodes that test the model most. And whether a month distorts the estimates is better judged from the fitted model, through the influence diagnostics of Section 7 and the remedies of Section 8, than by a cut-off applied beforehand. The next section screens the values with plausibility checks alongside the descriptive statistics, distributions and correlations of the dataset.
+

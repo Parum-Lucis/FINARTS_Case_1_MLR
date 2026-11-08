@@ -1,0 +1,263 @@
+---
+title: "Macro-Financial Determinants of the Philippine Stock Exchange Index (PSEi) Returns: A Multiple Linear Regression Analysis, 2018-2025"
+author:
+  - 'Macayan, Adrian Denzel\*'
+  - Miranda, Lara Stephanie
+  - Olaco, Tiarra
+  - Roa, Marco Antonio
+date: "8 November 2026"
+toc-title: "Table of Contents"
+bibliography: Case-1-Bibliography.bib
+csl: apa.csl
+nocite: '@*'
+knit: (function(input, ...) { out <- file.path(dirname(input), "..", "output"); dir.create(out, showWarnings = FALSE); rmarkdown::render(input, output_dir = normalizePath(out), envir = globalenv(), ...) })
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 4
+    includes:
+      in_header: cover.tex
+  html_document:
+    toc: true
+    toc_depth: 4
+---
+
+```{r setup, echo=FALSE}
+if (!requireNamespace("pacman", quietly = TRUE)) {
+  install.packages("pacman")
+}
+
+pacman::p_load(
+  tidyverse,      
+  skimr,          
+  corrplot,      
+  lubridate,
+  quantmod,
+  zoo,
+  readxl,
+  here,
+  
+  # modeling and summary formatting
+  broom,         
+  modelsummary,   
+  
+  # penalized (Firth) logistic regression for the rare-event crash model
+  logistf,
+
+  # diagnostic testing & inference
+  car,            
+  lmtest,         
+  sandwich,
+  olsrr,
+
+  # structural stability (CUSUM, Chow)
+  strucchange
+)
+
+# knitr setup
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 12,
+  fig.height = 4.5
+)
+
+# Every plot is written as its own paragraph. Pandoc turns a lone image into a numbered, captioned figure, but images of one chunk that sit in the same paragraph would lose their captions.
+plot_hook <- knitr::knit_hooks$get("plot")
+if (is.function(plot_hook)) {
+  knitr::knit_hooks$set(plot = function(x, options) paste0("\n\n", plot_hook(x, options), "\n\n"))
+}
+
+# shared settings and helpers
+alpha <- 0.05                                    # significance level
+
+fmt_p <- function(p) if_else(is.na(p), NA_character_,
+                             if_else(p < 0.0001, "<0.0001", as.character(signif(p, 3))))
+
+hc3 <- function(m) vcovHC(m, type = "HC3")       # heteroskedasticity-robust covariance
+nw  <- function(m, ...) NeweyWest(m, prewhite = FALSE, ...)   # HAC covariance
+
+tex_escape <- function(s) {
+  s <- as.character(s)
+  s <- gsub("\\", "\001", s, fixed = TRUE)
+  s <- gsub("([&%$#_{}])", "\\\\\\1", s)
+  s <- gsub("~", "\\textasciitilde{}", s, fixed = TRUE)
+  s <- gsub("^", "\\textasciicircum{}", s, fixed = TRUE)
+  s <- gsub("\u2248", "$\\approx$", s, fixed = TRUE)
+  gsub("\001", "\\textbackslash{}", s, fixed = TRUE)
+}
+
+fit_kable <- function(x, caption = NULL, align = NULL, col.names = NULL, ...,
+                      header_width = 12, text_width_pt = 460, full_width = FALSE, rule_after = NULL, min_width = 0.8) {
+  if (!knitr::is_latex_output()) {                       # HTML and plain markdown: an ordinary kable
+    args <- list(x, caption = caption)
+    if (!is.null(align)) args$align <- align
+    if (!is.null(col.names)) args$col.names <- col.names
+    return(do.call(knitr::kable, c(args, list(...))))
+  }
+  # pandoc loads booktabs and array only for tables it writes itself, so register them here
+  knitr::knit_meta_add(list(rmarkdown::latex_dependency(c("booktabs", "array", "float"))))
+  x <- as.data.frame(x, stringsAsFactors = FALSE)
+  has_rn <- !identical(rownames(x), as.character(seq_len(nrow(x))))
+  rn  <- if (has_rn) rownames(x) else character(0)
+  hdr <- if (is.null(col.names) || all(is.na(col.names))) colnames(x) else col.names
+  is_num <- vapply(x, is.numeric, logical(1))
+  is_chr <- vapply(x, function(v) is.character(v) || is.factor(v), logical(1))
+
+  # alignment of the data columns
+  al <- if (is.null(align)) ifelse(is_num, "r", "l") else align
+  if (length(al) == 1 && nchar(al) > 1) al <- strsplit(al, "")[[1]]
+  al <- rep_len(al, ncol(x))
+
+  # widest cell (characters) and longest unbreakable piece of each column, before escaping.
+  # Text may break at spaces and after underscores.
+  raw <- lapply(x, function(v) if (is.numeric(v)) format(v, digits = getOption("digits")) else as.character(v))
+  cell_w <- vapply(raw, function(s) max(c(0, nchar(s)), na.rm = TRUE), numeric(1))
+  piece_w <- vapply(raw, function(s) {
+    p <- unlist(strsplit(s[!is.na(s)], "[ _]+"))
+    max(c(0, nchar(p)))
+  }, numeric(1))
+
+  # long headers wrap at spaces and after underscores
+  wrap_hdr <- function(s) {
+    if (is.na(s) || !nzchar(s)) return("")
+    gsub("_ ", "_", strwrap(gsub("_", "_ ", s, fixed = TRUE), width = header_width), fixed = TRUE)
+  }
+  hdr_lines <- lapply(hdr, wrap_hdr)
+  hdr_w <- vapply(hdr_lines, function(l) max(c(0, nchar(l))), numeric(1))
+  hdr_tex <- vapply(seq_along(hdr_lines), function(j) {
+    l <- tex_escape(hdr_lines[[j]])
+    if (length(l) < 2) return(paste(l, collapse = ""))
+    sprintf("\\shortstack[%s]{%s}", switch(al[j], r = "r", c = "c", "l"), paste(l, collapse = "\\\\ "))
+  }, character(1))
+
+  # escape text cells (and let long text break after an underscore) and row names
+  for (j in which(is_chr)) x[[j]] <- gsub("\\_", "\\_\\allowbreak{}", tex_escape(x[[j]]), fixed = TRUE)
+  if (has_rn) rownames(x) <- tex_escape(rn)
+
+  # Long text columns get a fixed width, so the text wraps, when the table would otherwise be too wide.
+  # A wrapped column is never narrower than its longest unbreakable piece.
+  nat <- 5.2 * pmax(cell_w, hdr_w) + 12                     # about this many points per column at 10 pt
+  if (has_rn) nat <- c(5.2 * max(c(0, nchar(rn))) + 12, nat)
+  off  <- as.integer(has_rn)
+  has_space <- vapply(raw, function(s) any(grepl(" ", s, fixed = TRUE)), logical(1))
+  cand <- which(is_chr & cell_w > 12 & (has_space | cell_w > 30))   # wordy text only; plain identifiers stay whole
+  if (sum(nat) > text_width_pt && length(cand)) {
+    floor_w <- 5.4 * pmax(piece_w[cand], hdr_w[cand]) + 12
+    room    <- text_width_pt - sum(nat[-(cand + off)])
+    want    <- room * cell_w[cand] / sum(cell_w[cand])
+    w       <- pmax(want, floor_w, 40)
+    for (i in seq_along(cand)) {
+      al[cand[i]] <- sprintf(">{\\raggedright\\arraybackslash}p{%dpt}", round(w[i] - 12))
+    }
+  }
+
+  # rule_after: row numbers after which a horizontal rule is drawn (to separate groups of rows)
+  linesep <- if (is.null(rule_after)) "" else ifelse(seq_len(nrow(x)) %in% rule_after, "\\midrule", "")
+  k <- knitr::kable(x, format = "latex", booktabs = TRUE, linesep = linesep, escape = FALSE,
+                    caption = if (is.null(caption)) NULL else tex_escape(caption), label = NA, position = "H",
+                    align = al, col.names = hdr_tex, ...)
+
+  # scale the table down, never up, if it is still wider than the text
+  # (first \begin{tabular} and last \end{tabular} are the table itself)
+  splice <- function(s, pat, ins, last = FALSE, after = FALSE) {
+    hits <- gregexpr(pat, s, fixed = TRUE)[[1]]
+    if (hits[1] < 0) return(s)
+    p <- if (last) hits[length(hits)] else hits[1]
+    at <- if (after) p + nchar(pat) - 1L else p - 1L
+    paste0(substr(s, 1, at), ins, substr(s, at + 1L, nchar(s)))
+  }
+  # full_width = TRUE: a short table is stretched to the full text width (tabular* with fill between the
+  # columns) instead of being left narrow; a table too wide for that is scaled down as described above
+  open <- regexpr("\\\\begin\\{tabular\\}(\\[[a-z]\\])?\\{", k[1])
+  # A table that fits is spread out to the width estimated for it (at least min_width of the text width,
+  # all of it if full_width). The estimate runs a little above the true width, so the table never overflows.
+  tbl_frac <- if (full_width) 1 else max(min_width, sum(nat) / text_width_pt)
+  if (sum(nat) <= text_width_pt && open > 0) {
+    k2 <- paste0(substr(k[1], 1, open - 1L),
+                 sprintf("\\begin{tabular*}{%.2f\\linewidth}{@{\\extracolsep{\\fill}}", tbl_frac),
+                 substr(k[1], open + attr(open, "match.length"), nchar(k[1])))
+    k2 <- splice(k2, "\\end{tabular", "*", last = TRUE, after = TRUE)
+  } else {
+    k2 <- splice(k[1], "\\begin{tabular}", "\\resizebox{\\ifdim\\width>\\linewidth\\linewidth\\else\\width\\fi}{!}{")
+    k2 <- splice(k2, "\\end{tabular}", "}", last = TRUE, after = TRUE)
+  }
+  attributes(k2) <- attributes(k)
+  k2
+}
+```
+
+```{r figure-placement, results='asis'}
+# Plots are numbered "Figure N" through their captions (fig.cap). In the PDF they are pinned where they are written, as the tables are, so no figure floats above the heading it belongs under.
+if (knitr::is_latex_output()) {
+  knitr::knit_meta_add(list(rmarkdown::latex_dependency("float")))
+  cat("\\floatplacement{figure}{H}\n")
+}
+```
+
+<style>
+/* HTML only (the PDF numbers its figures itself): "Figure 1: ...", "Figure 2: ..." in the order they appear */
+body { counter-reset: figure; }
+p.caption::before { counter-increment: figure; content: "Figure " counter(figure) ": "; }
+/* figure and table captions are centred */
+p.caption, caption { text-align: center; }
+</style>
+
+```{r date_setup}
+start_date <- ymd("2017-12-01")
+end_date   <- ymd("2025-12-31")
+```
+
+# Executive Summary
+
+This report examines the connection between international and domestic macro-financial indicators and the monthly log returns of the Philippine Stock Exchange Index (PSEi) from January 2018 through December 2025, using 96 monthly observations. Its nine variables represent four channels: the discount rate (the change in the Bangko Sentral ng Pilipinas (BSP) reverse repurchase rate, the change in the Philippine 10-year government bond yield and consumer price inflation), global risk (the S&P 500 return, the WTI crude oil return and the Volatility Index (VIX)), exchange rate (USD/PHP) and liquidity and real activity (M3 money supply growth and manufacturing production growth). The series come from the Federal Reserve Bank of St. Louis, LSEG Workplace, PSA (Philippine Statistics Authority), and the BSP and were aligned to a common monthly basis. As our dependent variable, the PSEi return is skewed to the left, with 21 months below -5 percent against 16 above +5 percent, and one month, March 2020, with a log return of -0.24, is also the extreme month of the S&P 500, WTI and the VIX.
+
+As our primary modeling approach, multiple linear regression measures the direction, size and significance of each association. Our initial model is significant as a whole (F(9, 86) = 12.79) and explains 57.2 percent of the variation in returns (adjusted R-squared 0.5277), yet under conventional standard errors only the USD/PHP exchange rate, the 10-year yield and WTI are individually significant. The money market and exchange rate group is jointly significant, while the domestic macroeconomic group is not, and the global risk group depends on the covariance estimator. Of five candidate models, AIC, AICc and BIC all prefer the three significant regressors, and the other six add no significant explanatory power (p = 0.507), although choosing them from the same sample favors them.
+
+Diagnostics found heteroskedasticity (Breusch-Pagan p = 0.025), functional-form misspecification (RESET p = 0.020) and one dominant influential observation, March 2020, whose Cook's distance of 1.55 is more than five times the next largest. To address these problems, we applied HC3 robust standard errors, a March 2020 dummy variable, Huber and MM robust regression and a reduced regression model. The USD/PHP exchange rate and the 10-year yield stayed significant and negative in every linear fit, whereas WTI weakened under HC3 (p = 0.147) and once March 2020 was modeled (p = 0.171). The reduced model with the dummy performs best, with an adjusted R-squared of 0.5881 and a cross-validated RMSE of 0.04280 against 0.5277 and 0.04936 for the initial model, a 13 percent lower error.
+
+We extend our work into Logistic regression to turn the question into probabilities: that of an up month (48 of 96 months) and that of a sharp decline, a return below -5 percent (21 months), modeled with a penalized likelihood because such events are rare. A 1 percent peso depreciation multiplies the odds of an up month by 0.39 and the odds of a sharp decline by 2.65, and a 10 basis point rise in the yield multiplies them by 0.78 and 1.22. Both drivers hold without March 2020 and the full models separate months well out of sample (cross-validated AUC 0.80 and 0.83), whereas we observe the oil effect on sharp declines does not hold.
+
+Thus, in summary, we show the following: A weaker peso may signal weak investor confidence and foreign fund outflows and raises the cost of imported goods and foreign-currency commitments, so a 1 percent depreciation goes with a monthly return about 2.0 percentage points lower. A higher yield lowers the present value of future earnings, raises borrowing costs and may make government bonds more attractive than equities, and the policy rate adds no separate signal. The global risk channel appears to act through the peso, and oil is a conditional signal of a global demand shock in an extreme month, and it is not a stable cost channel. Inflation, M3 and manufacturing production are slow year-on-year rates that markets price before release, so they are inconclusive, not irrelevant, since 96 months are too few to measure them precisely. We stress all of this is contemporaneous association, not causation or forecast.
+
+Our recommendation follows the strength of the evidence. In assessing Philippine stocks, investors should monitor the USD/PHP exchange rate and the 10-year government bond yield, and should pay particular attention to companies with substantial foreign-currency liabilities, dependence on imported materials or high debt. If the peso depreciates 1 percent and the yield rises 10 basis points in the same month, the estimated odds put the chance of a sharp decline near 48 percent against 22 percent in the sample (illustrative), so investors should reassess equity exposure, diversify across asset classes, favoring short-dated government securities, and prefer firms with healthy finances and stable cash flows. Crude oil prices should not serve as a standalone indicator, and these signals indicate when to review exposure, not when to buy or sell.
+
+\newpage
+
+```{r include-section-01, child = "sections/section_01_project_overview.Rmd"}
+```
+
+```{r include-section-02, child = "sections/section_02_data.Rmd"}
+```
+
+```{r include-section-03, child = "sections/section_03_data_preprocessing.Rmd"}
+```
+
+```{r include-section-04, child = "sections/section_04_exploratory_data_analysis.Rmd"}
+```
+
+```{r include-section-05, child = "sections/section_05_baseline_mlr.Rmd"}
+```
+
+```{r include-section-06, child = "sections/section_06_model_evaluation.Rmd"}
+```
+
+```{r include-section-07, child = "sections/section_07_regression_diagnostics.Rmd"}
+```
+
+```{r include-section-08, child = "sections/section_08_model_improvement.Rmd"}
+```
+
+```{r include-section-09, child = "sections/section_09_logistic_regression.Rmd"}
+```
+
+```{r include-section-10, child = "sections/section_10_financial_interpretation.Rmd"}
+```
+
+```{r include-section-11, child = "sections/section_11_financial_recommendation.Rmd"}
+```
+
+# References
+
+<div id="refs"></div>

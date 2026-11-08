@@ -1,0 +1,352 @@
+# Section 5: Baseline Multiple Linear Regression
+
+Our baseline multiple linear regression (MLR) relates monthly PSEi log returns to the nine macro-financial regressors introduced in the data section, estimated by ordinary least squares (OLS) on the 96 months from January 2018 to December 2025. The model specifies the conditional mean of the return: each slope measures the association between one regressor and the return while the other eight are held constant, a partial association in the ceteris paribus sense and not a causal effect. The section follows the baseline as a ladder of inferential steps, each answering a narrower question than the one before it. We begin with the overall fit and the joint significance of the model, move to the individual coefficients through hypothesis tests and confidence intervals, ask whether the estimated effects matter in economic terms and not only in statistical terms, and end with joint F-tests on groups of regressors. Together, our modeling explores an initial account of the factors associated with PSEi returns and set the agenda for the diagnostic testing and robustness checks that follow.
+
+OLS is the natural starting point for three reasons. Its coefficients are transparent partial associations that can be read directly in return units, which keeps the financial interpretation close to the estimates. Under the Gauss-Markov conditions, it is the best linear unbiased estimator, and when the errors are normally distributed the t and F statistics have exact distributions, so hypotheses about single coefficients and about groups of coefficients are tested within one framework. And because nested linear models are simple to compare, the baseline serves as the benchmark against which every later specification is judged.
+
+The same method has well-known weaknesses, and they shape how we read our results. The conditional mean is assumed to be linear and additive, so asymmetries and interactions are ignored. The standard errors are valid only if the errors have constant variance and are serially uncorrelated; when they are not, conventional tests can mislead, which is why heteroskedasticity-consistent covariance estimators were developed [@white_heteroskedasticity-consistent_1980; @long_using_2000]. Least squares gives disproportionate weight to extreme observations [@huber_robust_1973], and in a sample of 96 months a single episode can move the estimates. Correlated regressors inflate standard errors, an omitted variable biases the included coefficients, and a contemporaneous regression on observational data supports statements about association, not about causation nor forecasting [@welch_comprehensive_2008]. In-sample fit also rewards every added regressor whether or not it carries information. The baseline results are therefore provisional: the classical assumptions are tested in the diagnostics section and relaxed through corrections in the model-improvement section, where the final specification is chosen.
+
+```{r initial-mlr}
+# Initial model: MLR Model: PSEI_t = b0 + b1 SP500_t + b2 USD_PHP_t + b3 BSP_RRP_Rate_t + b4 PH_10Y_GS_Yield_t + b5 PH_CPI_t + b6 PH_M3_t + b7 PH_Manufacturing_Production_t + b8 WTI_t + b9 VIX_t + e_t
+
+regressors <- setdiff(vars, "PSEI")
+mlr_formula <- reformulate(regressors, response = "PSEI")
+
+# print the model formula centred on the page, without the "##" output prefix
+formula_txt <- paste(trimws(deparse(mlr_formula)), collapse = " ")
+knitr::asis_output(if (knitr::is_latex_output()) {
+  paste0("\n\n\\begin{center}\\texttt{", tex_escape(formula_txt), "}\\end{center}\n\n")
+} else {
+  paste0("\n\n<p style=\"text-align:center\"><code>", formula_txt, "</code></p>\n\n")
+})
+
+# complete-case estimation sample: Dec 2017 is only the base month for the returns and differences, so the sample is Jan 2018 - Dec 2025. Every model in the report is fitted on these rows.
+df_model <- df_econometrics |>
+  select(year_month, PSEI, all_of(regressors)) |>
+  drop_na()
+n_obs <- nrow(df_model)
+
+# lm() linear model generator
+model_initial <- lm(mlr_formula, data = df_model)
+
+# coefficients, standard errors, t-statistics, p-values, 95% confidence intervals
+tidy(model_initial, conf.int = TRUE, conf.level = 0.95) |>
+  transmute(
+    term,
+    estimate,
+    std_error = std.error,
+    t_stat    = statistic,
+    p_value   = if_else(p.value < 0.0001, "<0.0001", as.character(signif(p.value,     3))),
+    ci_lower  = conf.low,
+    ci_upper  = conf.high,
+    signif    = case_when(p.value < 0.001 ~ "***", p.value < 0.01 ~ "**",
+                          p.value < 0.05 ~ "*", p.value < 0.10 ~ ".", TRUE ~ "")
+  ) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 4))) |>
+  fit_kable(caption = "Initial MLR: PSEI on 9 regressors (OLS)")
+
+# R-squared, adjusted R-squared and the overall F-test
+model_fstat <- summary(model_initial)$fstatistic
+
+glance(model_initial) |>
+  transmute(
+    n                = nobs,
+    r_squared        = r.squared,
+    adj_r_squared    = adj.r.squared,
+    residual_std_err = sigma,
+    f_statistic      = statistic,
+    f_df_numerator   = model_fstat[["numdf"]],
+    f_df_denominator = model_fstat[["dendf"]],
+    f_p_value        = if_else(p.value < 0.0001, "<0.0001", as.character(signif(p.value, 3)))
+  ) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 4))) |>
+  pivot_longer(everything(), names_to = "statistic", values_to = "value",
+               values_transform = as.character) |>
+  fit_kable(caption = "Model fit and overall F-test (H0: all slope coefficients = 0)")
+```
+
+We first ask whether the nine regressors, taken together, carry information about the return at all. The coefficient table reports each estimate with its standard error, t statistic, p-value and 95% confidence interval, with stars marking p-values below 0.001, 0.01 and 0.05 and a dot marking those below 0.10. The fit table reports R-squared, adjusted R-squared, the residual standard error and the overall F-test, whose null hypothesis is that all nine slopes are zero against the alternative that at least one is not. R-squared is the share of the sample variation in returns accounted for by the fitted equation; adjusted R-squared penalizes the loss of degrees of freedom and is the more honest guide when some regressors may be redundant. Both describe fit within the estimation sample and say nothing about performance on new data.
+
+The initial model accounts for about 57.2 percent of the variation in monthly PSEi returns (R-squared = 0.572; adjusted R-squared = 0.528), with a residual standard error of about 4.1 percentage points across 96 observations. The overall F-test, F(9, 86) = 12.79 with a p-value below 0.0001, rejects the null hypothesis that all slope coefficients are simultaneously zero, so the regressors carry statistically significant information about returns when taken together. The gap of about 0.045 between R-squared and adjusted R-squared is a first hint that some of the nine regressors add little, a possibility that the individual and joint tests below examine directly.
+
+Three of the nine regressors are significant at the 1 percent level. The exchange rate has the strongest association with returns (coefficient = -2.045, p < 0.0001). Because both variables are measured as log changes, the estimate reads as an elasticity: holding the other regressors constant, a one percent rise in USD/PHP, a one percent depreciation of the peso, is associated with a monthly return about 2.0 percentage points lower. The 10-year government bond yield also has a significant negative coefficient (-0.0405, p = 0.00215), so that each 10 basis point rise in the yield is associated with a return about 0.4 percentage points lower, a pattern that fits competition between fixed income and equities as yields rise. WTI crude oil has a significant positive coefficient (0.1297, p = 0.000617): a 10 percent rise in oil is associated with a return about 1.3 percentage points higher. A positive sign is notable for an economy that relies heavily on imported oil, and @kilian_impact_2009 suggest one reading, that oil price increases driven by strong global demand coincide with higher equity returns, so that WTI may proxy for global activity and not for an oil cost shock. The relationship warrants the robustness checks that follow, particularly with respect to the influence of March 2020.
+
+The remaining six regressors, namely the S&P 500, the VIX, the BSP reverse repurchase rate, consumer price inflation, M3 growth and manufacturing production, are not significant even at the 10 percent level. The S&P 500 is the most informative case. Its simple correlation with PSEi returns is 0.487, yet in the multiple regression its coefficient is small relative to its standard error (p = 0.244) and its standardized size falls to 0.107. The contrast illustrates the difference between a marginal and a partial association: the S&P 500 moves with oil (correlation 0.413), with the yield (-0.377) and with the exchange rate (-0.322), so much of what it appears to explain alone is already carried by those regressors, and little remains once they are held constant. The variance inflation factors examined in the diagnostics section are all small (the largest is 2.16), so this is shared variation and not a collinearity problem. Manufacturing production is also insignificant (p = 0.461), although the extreme values identified in the exploratory analysis may be distorting its estimate. Those observations remain untreated in the baseline model.
+
+## Coefficient Tests
+
+```{r coefficient-tests}
+# Individual t-tests on each slope of model_initial.
+df_res <- df.residual(model_initial)
+t_crit <- qt(1 - alpha / 2, df_res)
+
+# Significance: H0: beta_j = 0 vs H1: beta_j != 0 (two-sided).
+# Rejecting H0 <=> p < alpha <=> the (1 - alpha) CI excludes 0.
+coef_tests <- tidy(model_initial) |>
+  filter(term != "(Intercept)") |>
+  mutate(
+    H0       = paste0("b(", term, ") = 0"),
+    H1       = paste0("b(", term, ") != 0"),
+    decision = if_else(p.value < alpha, "Reject H0", "Fail to reject H0")
+  )
+
+coef_tests |>
+  transmute(
+    H0, H1,
+    estimate,
+    std_error = std.error,
+    t_stat    = statistic,
+    df        = df_res,
+    t_crit    = t_crit,
+    p_value   = if_else(p.value < 0.0001, "<0.0001", as.character(signif(p.value, 3))),
+    decision
+  ) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 4))) |>
+  fit_kable(caption = "(A) Two-sided t-tests, alpha = 0.05")
+
+# Directional tests where theory gives an expected sign (one-sided, alpha = 0.05).
+# WTI is left two-sided only: the sign is ambiguous for a net oil importer whose
+# equities also co-move with risk appetite.
+expected_sign <- tribble(
+  ~term,                         ~sign, ~rationale,
+  "SP500",                       "+",   "global equity co-movement",
+  "USD_PHP",                     "-",   "peso depreciation -> foreign outflows",
+  "BSP_RRP_Rate",                "-",   "policy tightening raises discount rates",
+  "PH_10Y_GS_Yield",             "-",   "higher yields lower equity valuations",
+  "PH_CPI",                      "-",   "inflation erodes real earnings",
+  "PH_M3",                       "+",   "more liquidity supports prices",
+  "PH_Manufacturing_Production", "+",   "stronger real activity",
+  "VIX",                         "-",   "risk aversion"
+)
+
+coef_tests |>
+  inner_join(expected_sign, by = "term") |>
+  mutate(
+    H0 = paste0("b(", term, ") ", if_else(sign == "+", "<= 0", ">= 0")),
+    H1 = paste0("b(", term, ") ", if_else(sign == "+", "> 0", "< 0")),
+    # one-sided p-value: half the two-sided p if the estimate has the expected sign
+    p_one = if_else(sign(estimate) == if_else(sign == "+", 1, -1), p.value / 2, 1 - p.value / 2),
+    t_crit_one = if_else(sign == "+", qt(1 - alpha, df_res), qt(alpha, df_res)),
+    decision = if_else(p_one < alpha, "Reject H0", "Fail to reject H0")
+  ) |>
+  transmute(
+    H0, H1, rationale,
+    estimate,
+    t_stat     = statistic,
+    t_crit     = t_crit_one,
+    p_one_sided = if_else(p_one < 0.0001, "<0.0001", as.character(signif(p_one, 3))),
+    decision
+  ) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 4))) |>
+  fit_kable(caption = "(B) One-sided tests against the theoretically expected sign")
+
+# (C) Parameter uncertainty: confidence intervals at three levels.
+ci_90 <- confint(model_initial, level = 0.90)
+ci_95 <- confint(model_initial, level = 0.95)
+ci_99 <- confint(model_initial, level = 0.99)
+
+slopes <- coef_tests$term
+tibble(
+  term       = slopes,
+  estimate   = coef_tests$estimate,
+  `90% low`  = ci_90[slopes, 1], `90% high` = ci_90[slopes, 2],
+  `95% low`  = ci_95[slopes, 1], `95% high` = ci_95[slopes, 2],
+  `99% low`  = ci_99[slopes, 1], `99% high` = ci_99[slopes, 2],
+  `95% width` = ci_95[slopes, 2] - ci_95[slopes, 1],
+  `0 in 95% CI?` = if_else(ci_95[slopes, 1] <= 0 & ci_95[slopes, 2] >= 0,
+                           "Yes (not significant)", "No (significant)")
+) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = "(C) Confidence intervals for the slope coefficients")
+# Sensitivity of these tests to the standard-error estimator (HC3, Newey-West) is
+# reported once, in the Robust Standard Errors subsection of the model-improvement section.
+```
+
+Second, we test each coefficient separately. For every slope the two-sided test takes the null hypothesis that the coefficient is zero against the alternative that it is not; the t statistic is the estimate divided by its standard error and is compared with the critical value of the t distribution with 86 degrees of freedom, 1.988 at the 5 percent level. Where theory gives an expected sign, a one-sided test is also reported, with the null hypothesis that the coefficient is zero or has the opposite sign and a critical value of 1.663. It is more powerful against the stated direction but cannot detect an effect of the opposite sign, so it is used only for regressors whose sign has a clear rationale. WTI is left to the two-sided test, because an oil price increase can raise or lower the equity market of an oil-importing economy depending on whether it signals global demand or an input-cost shock. A rejection or a failure to reject is a statement about the sampling uncertainty of one estimate under its null; it says nothing about how large the effect is, which is why the next two approaches examine intervals and magnitudes.
+
+The two-sided tests in panel (A) reject the null hypothesis for the exchange rate, the 10-year yield and WTI and fail to reject it for the other six regressors, in agreement with the p-values in the coefficient table. The one-sided tests in panel (B) support the expected negative signs for the exchange rate (p < 0.0001) and the 10-year yield (p = 0.001), consistent with the possibility that peso depreciation contributes to capital outflows and that higher government bond yields reduce the relative attractiveness of equities. The S&P 500, the VIX, the policy rate and manufacturing production carry their expected signs but are not significant, with one-sided p-values between 0.122 and 0.364. Inflation and M3 growth carry signs opposite to the theoretical expectation and are also insignificant, so their estimated effects cannot be distinguished from zero. WTI is excluded from the one-sided tests for the reason given above.
+
+The confidence intervals in panel (C) add the dimension of precision. The 95 percent intervals for the exchange rate (-2.649 to -1.441), the 10-year yield (-0.0660 to -0.0151) and WTI (0.0572 to 0.2022) exclude zero and stay on the same side of zero at the 99 percent level, which reinforces the three rejections. The intervals for the other six regressors contain zero at all three levels. An interval carries more information than a significance decision, because it reports the range of coefficient values that the data cannot reject; an interval that contains zero therefore marks the limit of the evidence and does not show that no effect exists [@greenland_statistical_2016]. The S&P 500 illustrates this: its interval (-0.0932 to 0.3615) is wide, which reflects imprecise estimation and not conclusive evidence of no relationship.
+
+
+```{r coefficient-ci-plot, fig.height=8, fig.cap="Initial model: coefficient estimates with 90%, 95% and 99% confidence intervals (dashed line = 0)"}
+# 90 / 95 / 99% intervals; dashed line = 0 (the null value)
+ci_plot_data <- bind_rows(
+  tibble(term = slopes, level = "90%", low = ci_90[slopes, 1], high = ci_90[slopes, 2]),
+  tibble(term = slopes, level = "95%", low = ci_95[slopes, 1], high = ci_95[slopes, 2]),
+  tibble(term = slopes, level = "99%", low = ci_99[slopes, 1], high = ci_99[slopes, 2])
+) |>
+  left_join(select(coef_tests, term, estimate), by = "term") |>
+  mutate(term = factor(term, levels = regressors))
+
+ggplot(ci_plot_data, aes(y = level)) +
+  geom_linerange(aes(xmin = low, xmax = high, linewidth = level, colour = level)) +
+  geom_point(aes(x = estimate), size = 2) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "firebrick") +
+  facet_wrap(~ term, scales = "free_x", ncol = 2) +
+  scale_linewidth_manual(values = c("90%" = 3, "95%" = 2, "99%" = 1), guide = "none") +
+  scale_colour_manual(values = c("90%" = "steelblue", "95%" = "grey40", "99%" = "grey70"),
+                      name = "Confidence level") +
+  labs(title = "Coefficient estimates with confidence intervals",
+       x = "Coefficient (point = OLS estimate)", y = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom", strip.text = element_text(face = "bold"))
+```
+
+The confidence-interval figure shows the same information graphically, with each coefficient plotted at the 90, 95 and 99 percent levels and a dashed line marking the null value of zero. The nested intervals show how the verdict on a coefficient depends on the significance level chosen: a coefficient whose 99 percent interval excludes zero is significant under any conventional threshold, whereas one whose interval crosses zero between the 90 and 95 percent levels is a borderline case. Because each panel is drawn on its own horizontal scale, the figure is suited to judging how far each interval sits from zero and not to comparing interval widths across regressors, a comparison that belongs to the next rung, where the effects are put on a common scale.
+
+In the figure, the exchange rate (about -2.05) and the 10-year yield (about -0.041) show negative associations with PSEi returns and WTI (about +0.13) a positive one. They are the only regressors whose intervals exclude zero at all three levels, as the two-sided tests and the interval table already indicated. Of the three, the yield lies closest to zero: even its 99 percent interval remains below the reference line, but only just.
+
+The intervals for the S&P 500, the VIX, the policy rate, inflation, M3 growth and manufacturing production all contain zero, so none of these coefficients can be distinguished from zero in the baseline model. M3 growth comes closest to significance, with zero falling only just inside its 90 percent interval. The S&P 500 interval stays wide (-0.093 to 0.362 at the 95 percent level), which points to uncertainty about the coefficient and not to the absence of a relationship. Manufacturing production has numerically small bounds only because of the scale of the variable, and its interval also contains zero. All of these intervals rest on the classical regression assumptions and may change if the residual diagnostics call for robust standard errors, a question taken up in the sections that follow.
+
+## Economic Significance
+
+```{r economic-significance, fig.height=4.5, fig.cap="Economic size of each effect: change in the PSEi monthly return, in percentage points, for a one-standard-deviation move in the regressor, with 95% confidence intervals (dotted lines = one standard deviation of the PSEi return)"}
+# Statistical vs economic significance. A slope depends on the unit of its regressor, so each
+# effect is restated for a one-standard-deviation move in the regressor: in percentage points of
+# PSEi return, and as a share of the PSEi's own monthly volatility (the standardised coefficient).
+sd_y <- sd(df_model$PSEI)
+
+effect_tab <- tidy(model_initial, conf.int = TRUE, conf.level = 0.95) |>
+  filter(term != "(Intercept)") |>
+  mutate(
+    sd_x        = map_dbl(term, \(v) sd(df_model[[v]])),
+    effect_pp   = 100 * estimate * sd_x,
+    ci_low_pp   = 100 * conf.low * sd_x,
+    ci_high_pp  = 100 * conf.high * sd_x,
+    std_beta    = estimate * sd_x / sd_y,
+    significant = if_else(p.value < alpha, "yes", "no")
+  )
+
+effect_tab |>
+  transmute(term, sd_of_regressor = sd_x, slope = estimate, effect_pp, ci_low_pp, ci_high_pp,
+            std_beta, p_value = fmt_p(p.value), significant) |>
+  mutate(across(where(is.numeric), ~ signif(.x, 3))) |>
+  fit_kable(caption = sprintf(
+    "Statistical vs economic significance: effect of a one-standard-deviation move in each regressor on the PSEi monthly return (the PSEi return has a standard deviation of %.2f percentage points)",
+    100 * sd_y))
+
+effect_tab |>
+  mutate(term = forcats::fct_reorder(term, effect_pp)) |>
+  ggplot(aes(effect_pp, term, colour = significant)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_vline(xintercept = c(-1, 1) * 100 * sd_y, linetype = "dotted", colour = "grey70") +
+  geom_pointrange(aes(xmin = ci_low_pp, xmax = ci_high_pp)) +
+  scale_colour_manual(values = c(yes = "firebrick", no = "grey40"), name = "Significant at 5%") +
+  labs(title = "Economic size of each effect (one-standard-deviation move)",
+       subtitle = "dotted lines: one standard deviation of the PSEi return",
+       x = "Effect on the PSEi monthly return (percentage points), 95% CI", y = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+A coefficient can be statistically significant without being large enough to matter, and a coefficient that is not significant can still be economically important if it is estimated imprecisely [@ziliak_size_2004; @wasserstein_asa_2016]. We therefore restate every slope in units that can be compared. Because a slope depends on the unit in which its regressor is measured, each effect is expressed as the change in the monthly PSEi return, in percentage points, associated with a one-standard-deviation move in the regressor, together with its 95 percent confidence interval and its standardized coefficient, which measures the same move as a share of the standard deviation of the return itself (5.97 percentage points). Reading the effect in percentage points ties the regression to an investor's own question, how much return is at stake, and the dotted lines in the figure mark a move of one standard deviation of the return as a benchmark for what counts as large.
+
+The exchange rate has the largest economic effect. A one-standard-deviation rise in USD/PHP (0.0159) is associated with a decrease of 3.25 percentage points in the monthly return, with a 95 percent confidence interval from -4.21 to -2.29 percentage points. Its standardized coefficient of -0.544 means that a one-standard-deviation move in the exchange rate corresponds to a move of just over half a standard deviation of the return in the opposite direction. WTI and the 10-year yield are also economically meaningful. A one-standard-deviation rise in WTI (0.136) is associated with a 1.76 percentage-point higher return (standardized coefficient 0.295), and a one-standard-deviation rise in the yield (0.368) with a 1.49 percentage-point lower return (standardized coefficient -0.250). The conservative ends of their intervals, 0.78 and 0.56 percentage points, are still roughly a tenth of the monthly volatility of the index or more.
+
+Among the regressors that fail the significance test, the S&P 500 has an estimated one-standard-deviation effect of +0.64 percentage points (standardized coefficient 0.107), with an interval from -0.44 to 1.72 that includes zero. M3 growth has an estimated effect of -0.73 percentage points (standardized coefficient -0.122, p = 0.195), and manufacturing production has the smallest estimated effect, a rise of 0.32 percentage points per standard deviation (standardized coefficient 0.054), despite its far wider unstandardized range.
+
+The intervals of these six regressors carry a further insight. Each of them reaches, at one end or the other, between 1.1 and 1.8 percentage points for a one-standard-deviation move, a magnitude comparable to the point estimates for WTI and the yield. The data therefore cannot exclude economically meaningful effects for any of the six; what they show is that a sample of 96 months is too noisy, with nine regressors to estimate, to measure them precisely. The six are better described as inconclusive than as irrelevant, and the model-improvement section returns to this when it considers removing them.
+
+
+## Joint Tests
+
+We then move from single coefficients to groups. A joint F-test takes the null hypothesis that every coefficient in a group is zero against the alternative that at least one is not. It is the appropriate tool when regressors work together or overlap, since a group can be informative even when no member passes an individual test, and a single joint test also controls the overall error rate that nine separate t-tests would not. Each test is reported in three forms: with the classical covariance matrix, which assumes constant variance and uncorrelated errors, and with the HC3 and Newey-West covariance matrices, which relax those assumptions [@white_heteroskedasticity-consistent_1980; @newey_simple_1987; @long_using_2000]. Agreement across the three is evidence that a conclusion does not rest on the error assumptions, and divergence marks a result that does. Four groups are examined: the global factors, the domestic macroeconomic indicators, the money market and foreign exchange indicators, and the three regressors that were individually significant. The first three correspond to channels through which financial conditions may reach the equity market, and the subsections below set out what the literature leads one to expect from each before the results are read.
+
+### Global Factor Indicators
+
+The global factors group contains the S&P 500, WTI crude oil and the VIX. The joint null hypothesis is that all three coefficients are zero, so that global equity returns, oil returns and market-implied volatility carry no information about PSEi returns once the domestic regressors are controlled. In the baseline model only WTI is individually significant, so the joint test shows whether the group has explanatory power beyond that single variable or whether WTI carries it alone. Our literature review below suggests why the three variables may matter together: global equity, oil and volatility shocks transmit to one another and to local markets, and the strength of that transmission changes with market conditions.
+
+The joint impact of international market variables such as the S&P 500, WTI returns, and the VIX on local equity market performance can be understood through their interconnected spillover effects and volatility transmission mechanisms. One study focusing on six Latin American stock markets (Argentina, Brazil, Chile, Colombia, Mexico, and Peru) found that the S&P 500 acts as a consistent sender of return spillovers across different quantiles, indicating its influence on these local markets. In contrast, the oil market (WTI) was identified as the highest receiver of spillovers, suggesting that shocks in WTI returns are more likely to be influenced by other markets rather than driving local equity returns directly. The VIX exhibited a dynamic role, alternating between being a sender and receiver of spillovers depending on market conditions, with stronger spillover effects during extreme market quantiles and bullish phases where the VIX became a notable sender of shocks to local markets [@kruel2025]. 
+
+Further, the volatility of WTI crude oil prices is influenced by shocks in the VIX and other financial indicators, with the VIX having a significant effect on oil price volatility. This relationship is time-varying and more pronounced during economic crises, which can indirectly affect local equity markets through changes in oil price volatility and associated uncertainty [@le2022]. Additionally, the interaction between the VIX and WTI spot prices is complex, with evidence of unidirectional influence from the VIX to WTI but no straightforward Granger causality, implying that their joint impact on local markets may involve intricate feedback loops [@chen2026]. 
+
+Geopolitical risk is a further link between oil, volatility and equity markets. Using a daily geopolitical risk index, it has been shown that geopolitical risk plays an important role in determining oil price volatility and, to a lesser extent, stock market volatility, that higher geopolitical risk goes with higher oil returns and lower stock returns, and that volatility spillovers run from oil to stock returns, so a geopolitical shock may reach a local equity market through oil prices and market volatility [@smales_geopolitical_2021].
+
+### Domestic Macroeconomic Indicators
+
+The domestic macroeconomic group contains consumer price inflation, M3 growth and manufacturing production, and the joint null hypothesis is that none of them is related to returns. None is individually significant, so the joint test shows whether three weak signals, taken together, add up to a detectable one. Two features of these series argue against a strong monthly relationship. They are year-on-year rates and therefore change slowly, with first-order auto-correlations of 0.95 for inflation, 0.94 for M3 growth and 0.73 for manufacturing production, so each month adds little news; and equity prices respond to unanticipated information [@chen_economic_1986], which a slowly moving year-on-year rate conveys only sluggishly. The literature below nevertheless documents links between consumer activity, money and the Philippine stock market, so the joint test is a fair way to give the group its chance.
+
+The joint impact of domestic macroeconomic variables such as the Philippine Consumer Price Index (PH_CPI), money supply (PH_M3), and manufacturing production on the local equity market performance can be understood through their influence on various sectors and overall stock market indices. Consumer activity, which is closely related to consumer spending and inflation measures like CPI, has been identified as a significant driver of stock market performance in the Philippines. Specifically, consumer activity and monetary policy variables, including money supply (M3), have a direct and indirect effect on the performance of all sectors in the Philippine Stock Market, with consumer activity being a primary determinant of stock market increases [@fernandez2020].
+
+Monetary policy, which encompasses money supply (PH_M3), shows a significant direct effect on sectors such as Financial, Holding Firms, Services, and Mining-Oil, although it does not directly affect Industrial and Property sectors. Business activity, which can be proxied by manufacturing production, is also a significant factor but mainly for the Financial, Industrial, and Property sectors [@fernandez2020]. This suggests that manufacturing production influences stock market performance, particularly in sectors related to industrial output.
+
+Inflation, as measured by CPI, is among the macroeconomic indicators that have a significant relationship with the Philippine Stock Exchange Index (PSEi). Studies using Granger causality analysis indicate that inflation, along with GDP, exchange rate, and interest rates, impacts the stock market performance, reflecting the sensitivity of the PSEi to changes in these macroeconomic variables [@gallardo2025].
+
+### Money Market and FX Indicators
+
+The money market and foreign exchange group contains the BSP reverse repurchase rate, the 10-year government bond yield and USD/PHP, and the joint null hypothesis is that all three coefficients are zero. Two of the three are individually significant and the policy rate is not, so a joint rejection would mostly reflect the exchange rate and the yield, and the test is informative chiefly about whether the policy rate adds anything once the market-determined prices are present.
+
+The joint impact of changes in monetary and foreign exchange variables, such as BSP's RRP, the yield on Philippine 10-year government securities, and the USD/PHP exchange rate, on equity markets can be explained by the combined influence of these variables on the cost of capital, investment decisions, and stock prices. Changes in monetary policy may influence bond yields and forex rates that, in turn, will affect investor decision-making and stock market performance. According to @checo2024, in their study of the effects of monetary policy transmission in emerging economies, it was discovered that tighter monetary policies result in persistent increases in government bond yields and, at the same time, appreciation of the domestic currency against foreign exchange rates and a decline in stock prices.
+
+Moreover, similar research was conducted by @sy2020, where he looked at the association of monetary and fiscal policies with the performance of the Philippine Stock Exchange Index from 2001 to 2017. Sy determined that a long-run equilibrium exists among the monetary policy rates, other macroeconomic factors, and the stock market returns. It was interesting to note that there is a positive long-term association between the domestic policy rates and stock market prices. In this sense, the effect of interest rates on stock market performance differs under different economic circumstances and periods of interest.
+
+Furthermore, @tala2025 studied the impact of macroeconomic fluctuations on the Financial Index of the Philippine Stock Exchange from 2009-2024, considering the exchange rate and the short-term and long-term interest rates. In this case, statistically significant long-run relationships were found between the macroeconomic indicators and the financial index, while short-run effects varied depending on economic conditions. The exchange rate and long-term interest rates remained significant during the COVID-19 pandemic, which indicates that the monetary and foreign exchange indicators can impact the stock exchange at the same time, even in the case of a period of economic uncertainty. These findings provide a basis for examining the joint relationship of BSP policy rate changes, Philippine 10-year government securities yield changes, and USD/PHP exchange rate movements with PSEi monthly log returns.
+
+### Set of Independently Significant Regressors
+
+The last group is not a technical channel but a check on parsimony. We collect the three regressors that were individually significant, the exchange rate, the 10-year yield and WTI, and test whether they remain jointly significant when the null restricts only these three coefficients and leaves the other six free. Because the three were chosen after seeing the individual tests, the joint test is subject to selection, and its p-value should be read as descriptive and not as independent confirmation.
+
+The joint impact of independently influential variables on the local equity market could be explained in terms of the collective effects of macroeconomic and financial variables on stock returns. Economic variables which are found to have significant influences on stock performance independently could also be able to add more insights about stock movements when considered collectively. In their study about the connection between macroeconomic variables and stock market performance among five Asian countries including the Philippines, @babar2024 discovered that economic variables such as gross domestic product, interest rates, exchange rate, and money supply were found to have positive relationships with stock market returns.
+
+Furthermore, @alloul2024 studied the effect of a number of macroeconomic variables, such as inflation rate, employment rate, foreign direct investments, and economic growth on stock market returns in developed, emerging and frontier markets. It was found out that there existed statistically significant long-term links between some macroeconomic variables and stock returns, but at the same time, the significance of some variables depended on the market types under consideration. Short-run relationships also varied across different market categories. This suggests that the relationships between macroeconomic variables and stock returns may vary across different economies.
+
+In addition, @cakici2024 analyzed the determinants of stock returns in various economies employing machine learning approaches. They discovered that specific financial variables such as momentum, earnings yield, market size, and long-term reversal were among key factors predicting stock returns; however, the importance of those varied in different forecast horizons. Meanwhile, particular variables measuring country risk did not contribute much to the forecast. These findings suggest that economic and financial variables may differ in their importance when considered together. Overall, these findings provide a basis for examining independently significant regressors jointly to determine their combined relationship with the Philippine Stock Exchange Index (PSEi) monthly log returns.
+
+```{r joint-tests}
+# Joint F-tests (Wald) on groups of slopes of model_initial.
+# H0: every coefficient in the group is 0; H1: at least one is non-zero.
+# Classical F-test, plus robust versions using HC3 and Newey-West covariances.
+
+joint_groups <- list(
+  "All slopes (overall significance)" = regressors,
+  "Global factors" = c("SP500", "WTI", "VIX"),
+  "Domestic macro" =
+    c("PH_CPI", "PH_M3", "PH_Manufacturing_Production"),
+  "Monetary and FX" =
+    c("BSP_RRP_Rate", "PH_10Y_GS_Yield", "USD_PHP"),
+  "Individually significant three" =
+    c("USD_PHP", "PH_10Y_GS_Yield", "WTI")
+)
+
+# (the redundancy test for the six insignificant regressors is the M1 vs M4 pair in the anova-f-test and wald-test cells)
+
+joint_test <- function(group, vcov. = NULL) {
+  hyp <- paste0(group, " = 0")
+  res <- if (is.null(vcov.)) linearHypothesis(model_initial, hyp, test = "F")
+         else linearHypothesis(model_initial, hyp, vcov. = vcov., test = "F")
+  tibble(F = res$F[2], p = res[["Pr(>F)"]][2])
+}
+
+imap(joint_groups, function(group, name) {
+  cls   <- joint_test(group)
+  rob3  <- joint_test(group, hc3(model_initial))
+  robnw <- joint_test(group, nw(model_initial))
+  tibble(
+    test_group       = name,
+    H0               = paste0("b = 0 for all ", length(group), " coefficients"),
+    q                = length(group),
+    df_resid         = df_res,
+    F_classical      = signif(cls$F, 4),
+    p_classical      = fmt_p(cls$p),
+    p_hc3            = fmt_p(rob3$p),
+    p_newey_west     = fmt_p(robnw$p),
+    decision_classical = if_else(cls$p < alpha, "Reject H0", "Fail to reject H0")
+  )
+}) |>
+  bind_rows() |>
+  fit_kable(caption = "Joint F-tests on groups of coefficients (alpha = 0.05)")
+```
+
+The joint-test table reports, for each group, the F statistic under the classical covariance matrix together with the p-values under the classical, HC3 and Newey-West matrices.
+
+The test of all nine slopes (q = 9, residual degrees of freedom = 86) gives F = 12.79 (p < 0.0001) and remains significant under both HC3 and Newey-West standard errors, so the baseline model is jointly significant however the covariance matrix is estimated. The money market and foreign exchange group (the policy rate, the 10-year yield and USD/PHP) is also strongly significant under all three methods (F = 21.44, p < 0.0001). This mainly reflects the individual significance of the exchange rate and the yield, since the policy rate is not significant on its own. In financial terms, the price of foreign currency and the price of domestic government borrowing together carry much of the explanatory power in the baseline model.
+
+The global factors group (the S&P 500, WTI and the VIX) is jointly significant under the classical covariance matrix (F = 8.368, p < 0.0001) and under Newey-West standard errors (p = 0.00303), but its p-value rises to 0.0901 under HC3, which supports significance only at the 10 percent level. The sensitivity may reflect heteroskedasticity or the influence of extreme observations, particularly in March 2020, and because WTI is the group's only individually significant member, much of the group's strength may rest on that one variable. In financial terms, the evidence that global conditions matter beyond oil is weak in the baseline model.
+
+The domestic macroeconomic group (inflation, M3 growth and manufacturing production) is not jointly significant under the classical (F = 1.070, p = 0.366), HC3 (p = 0.644) or Newey-West (p = 0.355) covariance matrices. These variables add little explanatory power in the baseline specification, which is consistent with the slow-moving character of year-on-year series noted above. A failure to reject the null hypothesis does not establish that their effects are absent, however, since the intervals reported earlier cannot rule out effects of one percentage point or more.
+
+Finally, the exchange rate, the 10-year yield and WTI are jointly significant under all three methods (F = 21.65, p < 0.0001), so their combined significance is robust to the adjustments for heteroskedasticity and autocorrelation. Because these three were singled out by the individual tests, however, their joint p-value describes the selected set and does not independently confirm it.
+
+Taken together, the five joint models give a consistent but provisional picture. The initial model is significant as a whole and accounts for a little over half of the variation in monthly returns. The exchange rate, the 10-year yield and WTI are the only regressors with individually significant coefficients, and of these the exchange rate has the largest economic effect; the other six are inconclusive and not demonstrably irrelevant. The group tests narrow the evidence to the prices of foreign currency and domestic borrowing, show that the case for the global factors depends on the covariance estimator, and find little in the domestic macroeconomic indicators. None of this has yet been tested against the assumptions on which the standard errors rest. March 2020 is a recurring concern, the extreme manufacturing production observations remain untreated, and the divergence between the HC3 and classical results already shows that inference is sensitive to the error assumptions. The following sections therefore evaluate the model against alternatives, diagnose it formally and correct what the diagnostics reveal before any of these associations is carried into the financial interpretation.
+

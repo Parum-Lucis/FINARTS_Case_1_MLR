@@ -1,0 +1,5 @@
+FRED daily snapshot used by Case_Study_Report.Rmd
+Downloaded: 2026-11-06 12:18 via quantmod::getSymbols(src = 'FRED')
+Series: DCOILWTICO (WTI crude oil, USD per barrel), SP500 (S&P 500 index), VIXCLS (CBOE VIX close)
+Window: 2017-12-01 to 2025-12-31 | rows: 2109 | first date: 2017-12-01 | last date: 2025-12-31
+To download again: set refresh_fred <- TRUE in the 'load fred' chunk of the Rmd (this overwrites the CSV).

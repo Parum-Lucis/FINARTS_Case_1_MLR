@@ -1,0 +1,201 @@
+# Section 4: Exploratory Data Analysis
+
+This section describes the analysis dataset before any model is estimated. The unit of observation is the calendar month, and the 96 observations run from January 2018 to December 2025. The dependent variable is the PSEi monthly log return, and the nine regressors are in the form set out in the previous section. They fall into three kinds: market prices and yields (the S&P 500, WTI, VIX, USD/PHP and the 10-year yield), the change in the BSP policy rate, and the year-on-year macroeconomic rates (CPI, M3 and manufacturing production). We first identify the descriptive statistics and plausibility checks, followed by visualizing box-plots, histograms, time-series plots, scatter plots and correlation heat-maps. We show three observations run through the discussion: how the PSEi behaves from month to month, how far one month, March 2020, shapes almost every display, and how the three kinds of regressor differ in their link to the PSEi. Together they show which patterns the regression has to explain and which features of the data may call for caution.
+
+## Descriptive Statistics
+
+```{r descriptive-stats}
+# math functions
+skewness <- function(x) mean((x - mean(x))^3) / mean((x - mean(x))^2)^1.5
+excess_kurtosis <- function(x) mean((x - mean(x))^4) / mean((x - mean(x))^2)^2 - 3
+n_outliers <- function(x, z = 3) sum(abs(x - mean(x)) / sd(x) > z)
+
+vars <- setdiff(names(df_econometrics), "year_month")
+
+num_long <- df_econometrics |>
+  pivot_longer(all_of(vars), names_to = "variable", values_to = "value") |>
+  filter(!is.na(value)) |>
+  mutate(variable = factor(variable, levels = vars))
+
+desc_stats <- num_long |>
+  group_by(variable) |>
+  summarise(
+    n           = n(),
+    mean        = mean(value),
+    median      = median(value),
+    min         = min(value),
+    max         = max(value),
+    range       = max - min,
+    sd          = sd(value),
+    skewness    = skewness(value),
+    ex_kurtosis = excess_kurtosis(value),
+    n_outliers  = n_outliers(value),
+    .groups     = "drop"
+  )
+
+desc_stats |>
+  mutate(across(where(is.numeric), ~ round(.x, 4))) |>
+  fit_kable(caption = "Descriptive statistics (excess kurtosis; normal = 0; outliers = |z| > 3)")
+
+# plausibility definitions
+tibble(
+  check = c("VIX <= 0", "PH_CPI outside [-5, 25]%", "PH_M3 outside [-20, 40]%",
+            "PH_Manufacturing_Production outside [-50, 100]%",
+            "|monthly log return| > 0.25 (PSEI, SP500, USD_PHP, WTI)"),
+  n_flagged = c(
+    sum(df_econometrics$VIX <= 0, na.rm = TRUE),
+    sum(!between(df_econometrics$PH_CPI, -5, 25), na.rm = TRUE),
+    sum(!between(df_econometrics$PH_M3, -20, 40), na.rm = TRUE),
+    sum(!between(df_econometrics$PH_Manufacturing_Production, -50, 100), na.rm = TRUE),
+    sum(abs(as.matrix(df_econometrics[c("PSEI", "SP500", "USD_PHP", "WTI")])) > 0.25,
+        na.rm = TRUE)
+  )
+) |>
+  fit_kable(caption = "Plausibility checks")
+
+# panel labels carrying the statistics
+panel_labels <- desc_stats |>
+  transmute(
+    variable,
+    lab_center = sprintf("%s\nmean = %.3f | median = %.3f", variable, mean, median),
+    lab_spread = sprintf("%s\nrange = %.3f | sd = %.3f", variable, range, sd),
+    lab_shape  = sprintf("%s\nskew = %.2f | ex. kurtosis = %.2f", variable, skewness, ex_kurtosis)
+  ) |>
+  
+  mutate(across(starts_with("lab_"), ~ factor(.x, levels = .x)))
+
+plot_data <- num_long |> left_join(panel_labels, by = "variable")
+stat_lines <- desc_stats |>
+  select(variable, mean, median) |>
+  pivot_longer(c(mean, median), names_to = "stat", values_to = "x") |>
+  left_join(panel_labels, by = "variable")
+```
+
+The descriptive statistics show that the PSEi return is centred near zero but skewed to the left. Its mean monthly log return is -0.53%, its median 0.05% and its standard deviation 5.97%, with 48 up months and 48 down months. Skewness is -0.94 and excess kurtosis 1.99, so large losses are larger and more frequent than large gains: 21 months fall below -5% against 16 above +5%. Much of this shape comes from one month: without March 2020 the skewness falls to -0.50 and the excess kurtosis to 0.47, so the PSEi is closer to normal than the full sample suggests. The only month beyond three standard deviations is March 2020, at -24.2% (z = -3.96). The same month is also the outlier of the S&P 500 (-13.4%), WTI (-78.2%) and the VIX (57.7, z = 5.62), which is our first sign of how much one month shapes the data.
+
+The regressors differ in scale and in shape. The S&P 500 is also left-skewed (-0.60) but has a positive mean (0.98%, standard deviation 4.77%), and the USD/PHP return (mean 0.17%, standard deviation 1.59%) is mildly right-skewed (0.48), its largest values being months of peso depreciation. The monthly change in the 10-year yield averages 0.01 percentage points with a standard deviation of 0.37, and ranges from -1.08 (January 2023) to +0.88 (September 2022). WTI has the heaviest tails (excess kurtosis 13.86), but two months, March and May 2020, account for almost all of it: without them the excess kurtosis falls to 0.22. The VIX is right-skewed (2.37), as expected for a gauge that jumps in stress months. The RRP change has a median of exactly zero because the rate is unchanged in 68% of months. Among the year-on-year rates, CPI runs from 0.8% to 8.7% (mean 3.93%, standard deviation 1.87) and M3 from -8.5% to 22.6% (mean 6.64%, standard deviation 6.47), whereas manufacturing production has a median of 0.47% but a mean of 19.7% and a standard deviation of 97.7, because of a few extreme year-on-year values.
+
+The plausibility checks agree: there is no VIX value who is zero or below, and CPI and M3 stay inside the ranges set for them, but 14 months of manufacturing production lie outside -50% to 100% (April 2020 to March 2022) and three monthly log returns, all of WTI (November 2018, March 2020 and May 2020), exceed 25% in absolute value. These values are kept as reported. They are real movements caused by the COVID-19 shock, not recording errors, and dropping them would remove the most informative months from a sample of only 96. The regressors need not be normal in any case: the distribution that matters for the regression is that of the residuals, and both the normality of the residuals and the influence of these months on the fitted model are assessed in the diagnostics.
+
+## Box-plots
+
+The box-plots show where each variable is concentrated and which months lie outside it. A point is marked as an outlier when it lies more than 1.5 interquartile ranges beyond the box, a looser rule than the |z| > 3 rule of the statistics table, so more months are flagged. The PSEi box runs from -4.0% to 2.7% around a median of about zero, and all three of its outliers are losses: March 2020, June 2022 and September 2022. The extremes of the market series have the same character. The S&P 500 has one outlier, March 2020, the VIX has two, March and April 2020, and the USD/PHP has three depreciation months, among them June and September 2022, the same two months in which the PSEi fell sharply. March 2020 is an outlier in the PSEi, S&P 500, WTI and VIX at once, so market stress appears as losses, depreciations and volatility spikes that arrive together. The 10-year yield and WTI have extremes on both sides. The RRP change has a collapsed box at zero, so each of the 31 months in which it moved is drawn as an outlier. Manufacturing production is the most extreme case: its box spans only -5.1% to 10.7%, yet 17 months lie outside it, from -81% to 498%. CPI and M3 are tighter, with two months above the box for CPI (January and February 2023) and one for M3 (August 2020).
+
+```{r descriptive-boxplots, fig.height=14, fig.cap="Boxplot of each variable (diamond = mean, red points = outliers)"}
+ggplot(plot_data, aes(x = "", y = value)) +
+  geom_boxplot(fill = "grey85", outlier.colour = "firebrick", outlier.size = 1.8) +
+  stat_summary(fun = mean, geom = "point", shape = 23, fill = "white", size = 2) +
+  coord_flip() +
+  facet_wrap(~ lab_spread, scales = "free", ncol = 2) +
+  labs(title = "Boxplots (diamond = mean, red = outliers)", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"), axis.text.y = element_blank())
+```
+
+## Histograms
+
+```{r descriptive-histograms, fig.height=14, fig.cap="Histogram of each variable, with its mean and median marked"}
+# histogram per variable with mean and median
+ggplot(plot_data, aes(value)) +
+  geom_histogram(bins = 25, fill = "grey70", colour = "white") +
+  geom_vline(data = stat_lines, aes(xintercept = x, colour = stat, linetype = stat),
+             linewidth = 0.8) +
+  facet_wrap(~ lab_center, scales = "free", ncol = 2) +
+  scale_colour_manual(values = c(mean = "firebrick", median = "steelblue"), name = NULL) +
+  scale_linetype_manual(values = c(mean = "solid", median = "dashed"), name = NULL) +
+  labs(title = "Histograms with mean and median", x = NULL, y = "Count") +
+  theme_minimal() +
+  theme(legend.position = "bottom", strip.text = element_text(face = "bold"))
+```
+
+The histograms add the mean (solid line) and the median (dashed line) of each variable, which makes asymmetry and the pull of extreme months easy to see. For the USD/PHP, WTI and the 10-year yield the two lines almost coincide, so a typical month is well described by its mean. For the PSEi and the S&P 500 the mean lies below the median (-0.53% against 0.05%, and 0.98% against 1.94%), the sign of a left tail. Most PSEi months lie between about -10% and +10%, with the tallest bars close to zero, and the few bars below -10% are the isolated months identified earlier. Among the macroeconomic series, the VIX mean (19.7) sits above its median (18.3), as expected for a right-skewed measure, whereas CPI and M3 have a mean close to the median (3.93 against 3.85, and 6.64 against 6.12) and spread-out, roughly bell-shaped bars. Two histograms are dominated by one bar. The RRP change is concentrated at zero, with a mean of 0.016 and a median of 0, and the small bars beside it fall at multiples of 0.25 percentage points, the size of a standard rate move. Manufacturing production has most of its months within a few points of zero (an interquartile range of -5.1% to 10.7%) and a few isolated bars out to 500%, so its mean (19.7%) is far above its median (0.47%). For this variable the median describes a typical month and the mean does not.
+
+## Time-Series
+
+```{r eda-time-series, fig.height=11, fig.cap="Each variable over time, January 2018 to December 2025 (dashed line = March 2020, the COVID-19 shock)"}
+# Each variable over time. The dashed line marks March 2020 (COVID-19 shock).
+ggplot(num_long, aes(year_month, value)) +
+  geom_line(colour = "steelblue", linewidth = 0.45) +
+  geom_vline(xintercept = as.Date("2020-03-01"), linetype = "dashed", colour = "firebrick") +
+  facet_wrap(~ variable, scales = "free_y", ncol = 2) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  labs(title = "Each variable over time", subtitle = "dashed line: March 2020", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+The time-series panels show when these patterns occurred. The dashed line marks March 2020, which is the sharpest move in four panels at once: the PSEi, S&P 500, WTI and VIX all reach their extremes in that month (-24.2%, -13.4%, -78.2% and 57.7), and the RRP rate was cut by 0.5 percentage points. Volatility is not constant. The standard deviation of the PSEi return is 9.4% in 2020 and 8.6% in 2022, against about 3% in 2019 and about 5% in 2018 and 2023 to 2025, and the VIX averages 29.1 in 2020 and 25.6 in 2022 against 15 to 17 in 2018, 2019, 2023 and 2024. These are two separate stress episodes. In 2022 the PSEi had its second and third worst months (September and June), the 10-year yield had its largest rise (0.88 percentage points in September) and the RRP rate rose by 0.75 percentage points in July and again in November. This clustering of calm and turbulent periods means that the variance of the errors in a regression may not be constant, which the diagnostics test. The RRP panel shows the policy cycles: hikes in 2018, cuts from 2019 to 2020, a long run of hikes from May 2022 to October 2023, and cuts again from August 2024. The year-on-year series are smooth and persistent. CPI peaks at 6.7% in late 2018, falls to 0.8% in October 2019 and reaches 8.7% in January 2023, M3 growth rises to 22.6% in August 2020 and falls to -8.5% in September 2022, and manufacturing production is flat apart from the collapse of 2020 and the surge of 2021 to 2022, which is consistent with comparison against a depressed base period.
+
+## Scatter Plots
+
+```{r eda-scatter, fig.height=9, fig.cap="PSEi monthly log return against each regressor"}
+# PSEi return against each regressor: the relationships the regression has to explain.
+scatter_long <- df_econometrics |>
+  pivot_longer(-c(year_month, PSEI), names_to = "regressor", values_to = "x") |>
+  mutate(regressor = factor(regressor, levels = setdiff(vars, "PSEI")))
+
+ggplot(scatter_long, aes(x, PSEI)) +
+  geom_point(alpha = 0.6, size = 1.4, colour = "grey30") +
+  geom_point(data = filter(scatter_long, year_month == as.Date("2020-03-01")),
+             colour = "firebrick", size = 2.6) +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, colour = "steelblue",
+              fill = "steelblue", alpha = 0.15, linewidth = 0.7) +
+  facet_wrap(~ regressor, scales = "free_x", ncol = 3) +
+  labs(title = "PSEi monthly log return against each regressor",
+       subtitle = "blue line: simple OLS fit; red point: March 2020", x = NULL, y = "PSEi log return") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+The scatter plots relate the PSEi return to each regressor, with the simple OLS line, its 95% band and March 2020 marked in red. Four regressors show a visible linear relationship. The USD/PHP has the strongest, with a negative slope (r = -0.60): months in which the dollar bought more pesos coincided with lower PSEi returns. The S&P 500 (r = 0.49) and WTI (r = 0.30) slope upwards and the 10-year yield slopes downwards (r = -0.43), so PSEi returns were higher in months of rising U.S. equities and oil and lower in months of rising local yields. All four relationships are significant at the 5% level. The other five panels are flat: the VIX (r = -0.14), the RRP change (-0.05), CPI (0.00), M3 (0.08) and manufacturing production (0.00) have lines close to horizontal and bands that include a zero slope. March 2020 matters most for WTI and the VIX. Without it the WTI correlation falls from 0.30 to 0.08 (p = 0.44), so the apparent oil effect rests on one month, and the VIX correlation changes sign from -0.14 to 0.13, neither being significant. The USD/PHP (-0.67), 10-year yield (-0.43) and S&P 500 (0.42) correlations do not depend on it. These are bivariate associations with the other regressors ignored. They show which relationships the multiple regression should recover, not what remains when all regressors are held constant together.
+
+## Pearson Correlation Heat-maps
+```{r correlation-matrix, fig.width=10, fig.height=5.5, fig.cap="Correlation heatmaps of the PSEi return and the regressors: all pairs (left) and with the cells left blank where the correlation is not significant at the 5% level (right)"}
+# pairwise-complete Pearson correlations
+cor_matrix <- df_econometrics |>
+  select(all_of(vars)) |>
+  cor(use = "pairwise.complete.obs")
+
+round(cor_matrix, 3) |>
+  fit_kable(caption = "Pearson correlation matrix")
+
+# correlation heatmaps: all coefficients, then with the significance rule applied
+cor_pvalues <- outer(vars, vars, Vectorize(function(a, b) {
+  if (a == b) return(0)
+  cor.test(df_econometrics[[a]], df_econometrics[[b]])$p.value
+}))
+dimnames(cor_pvalues) <- dimnames(cor_matrix)
+
+# the two heatmaps are drawn side by side, in one figure, so that both sit on the page of the table above
+layout(matrix(1:2, nrow = 1))
+
+# left panel: all correlations shown (vertical labels keep the matrix large enough to read)
+corrplot(cor_matrix, method = "color", type = "upper", order = "original",
+         addCoef.col = "black", number.cex = 0.62, tl.col = "black", tl.srt = 90,
+         tl.cex = 0.75, cl.cex = 0.75, cl.ratio = 0.12, diag = FALSE, mar = c(0, 0, 1.5, 1),
+         title = "All pairs")
+
+# right panel: blank cells if not significant at the 5% level
+corrplot(cor_matrix, method = "color", type = "upper", order = "original",
+         addCoef.col = "black", number.cex = 0.62, tl.col = "black", tl.srt = 90,
+         tl.cex = 0.75, cl.cex = 0.75, cl.ratio = 0.12, p.mat = cor_pvalues, sig.level = 0.05, insig = "blank",
+         diag = FALSE, mar = c(0, 0, 1.5, 1),
+         title = "Blank = not significant at 5%")
+
+layout(1)
+
+# strongest pairs
+cor_pairs <- as_tibble(cor_matrix, rownames = "var1") |>
+  pivot_longer(-var1, names_to = "var2", values_to = "r") |>
+  filter(match(var1, vars) < match(var2, vars)) |>
+  arrange(desc(abs(r)))
+
+cor_pairs |>
+  slice_head(n = 10) |>
+  mutate(r = round(r, 3)) |>
+  fit_kable(caption = "Ten strongest pairwise correlations")
+
+```
+
+The correlation matrix and its two heatmaps summarise all pairwise relationships. The second heatmap leaves a cell blank when the correlation is not significant at the 5% level, which removes 31 of the 45 pairs. The PSEi row repeats the scatter-plot result: it is significantly correlated with the USD/PHP (-0.60), the S&P 500 (0.49), the 10-year yield (-0.43) and WTI (0.30), and with none of the VIX, RRP change, CPI, M3 and manufacturing production (p-values from 0.18 to 0.98). Most pairs among the regressors are weak: of the 36, only seven have |r| of at least 0.30 and three have |r| of at least 0.50. The largest among the market variables are WTI with the S&P 500 (0.41) and the 10-year yield with the S&P 500 (-0.38). The exception is the domestic macroeconomic group. The RRP change is correlated with CPI (0.66) and with M3 growth (-0.51), and CPI with M3 (-0.56), three of the four strongest pairs in the table of ten. This is consistent with a policy rate that rises when inflation is high and money growth is slowing. None of the three is related to the PSEi, so they overlap with one another without explaining the index, which can inflate their standard errors in a regression and is checked with variance inflation factors in the diagnostics. Taken with the bivariate patterns, the evidence points to the exchange rate, global equity returns, local yields and, less reliably, oil as the main candidates, with March 2020 the observation most likely to influence the fit.
+
